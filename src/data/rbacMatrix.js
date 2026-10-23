@@ -791,8 +791,10 @@ export function droit(user, code, action = 'lire') {
   const rows = user?.habilitations;
   if (!Array.isArray(rows) || rows.length === 0) return true;
   const row = rows.find((item) => item.code === code);
-  if (!row) return false;
+  // ACCESS_* ouvre la page. Sans ligne de gestion (ex. « flux »), on ne bloque pas le métier du rôle.
+  if (!row) return true;
   if (action === 'acces') return Boolean(row.acces || row.lire || row.creer || row.modifier || row.valider || row.supprimer);
+  if (action === 'lire') return Boolean(row.lire || row.acces || row.creer || row.modifier || row.valider || row.supprimer);
   return Boolean(row[action]);
 }
 
@@ -833,9 +835,12 @@ export function pagesAutorisees(user) {
       const gestion = meta ? parCode.get(meta.gestion) : null;
       const actions = ACTIONS_PAGE
         .filter(([cle]) => {
-          if (!gestion) return cle === 'lire';
           if (cle === 'lire') return true;
-          return Boolean(gestion[cle]);
+          if (gestion) return Boolean(gestion[cle]);
+          if (module.id === 'flux_appro' && ROLES_ANTENNE.includes(codeRole)) {
+            return cle === 'creer' || cle === 'modifier';
+          }
+          return false;
         })
         .map(([, libelle]) => libelle);
       return {

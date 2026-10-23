@@ -602,8 +602,10 @@ export default function FluxApprovisionnement({ activePersona }) {
   const estVueSiege = stage === 'siege' || stage === 'supervision';
   const peutCommander = estDemandeur
     || estDirectionGenerale
+    || estChefAntenne
     || ((stage === 'antenne' || stage === 'supervision') && droit(activePersona, 'flux', 'creer'));
-  const peutTransferer = (stage === 'antenne' || stage === 'supervision') && droit(activePersona, 'flux', 'modifier');
+  const peutTransferer = (stage === 'antenne' || stage === 'supervision')
+    && (estChefAntenne || estSupervision || droit(activePersona, 'flux', 'modifier'));
   const peutPrendreCharge = estVueSiege && (droit(activePersona, 'flux', 'modifier') || droit(activePersona, 'flux', 'valider'));
   const peutDisperser = estVueSiege && droit(activePersona, 'flux', 'valider');
   const nomChef = activePersona?.nom || activePersona?.name || '';
@@ -1559,12 +1561,31 @@ export default function FluxApprovisionnement({ activePersona }) {
                 </ol>
               </div>
             )}
-            <div className="flex justify-end gap-2">
+            <div className="flex flex-wrap justify-end gap-2">
               {demandeEditable(commandeDetail) && (
                 <>
                   <BoutonModifier titre="Modifier la demande" onClick={() => { setLigneOuverte(null); ouvrirModification(commandeDetail); }} />
                   <BoutonSupprimer titre="Supprimer la demande" onClick={() => supprimerCommande(commandeDetail)} />
                 </>
+              )}
+              {actionsCommande(commandeDetail).aTransferer && (
+                <button
+                  type="button"
+                  disabled={transfertEnCours === commandeDetail.id}
+                  onClick={() => { setLigneOuverte(null); transfererAuSiege(commandeDetail); }}
+                  className="px-3 py-2 text-xs font-bold rounded bg-amber-600 text-white disabled:opacity-60"
+                >
+                  {transfertEnCours === commandeDetail.id ? 'Transfert…' : 'Transférer au siège'}
+                </button>
+              )}
+              {actionsCommande(commandeDetail).aPrendre && (
+                <button type="button" onClick={() => { setLigneOuverte(null); ouvrirAction('prise', commandeDetail); }} className="px-3 py-2 text-xs font-bold rounded bg-[#2E68B4] text-white">Prendre en charge</button>
+              )}
+              {actionsCommande(commandeDetail).aDisperser && (
+                <button type="button" onClick={() => { setLigneOuverte(null); ouvrirAction('dispersion', commandeDetail); }} className="px-3 py-2 text-xs font-bold rounded bg-[#0E2A4F] text-white">Disperser</button>
+              )}
+              {actionsCommande(commandeDetail).aRejeter && (
+                <button type="button" onClick={() => { setLigneOuverte(null); rejeter(commandeDetail); }} className="px-3 py-2 text-xs font-bold rounded border border-rose-300 text-rose-700">Rejeter</button>
               )}
               <button type="button" onClick={() => setLigneOuverte(null)} className="px-3 py-2 text-xs font-bold rounded border border-slate-300 text-slate-700">Fermer</button>
             </div>
