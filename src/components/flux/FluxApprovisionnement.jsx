@@ -5,12 +5,18 @@ import { BoutonModifier, BoutonSupprimer, BoutonVoir } from '../common/BoutonsAc
 import { apiRequest } from '../../services/api';
 import { askConfirm, pushToast } from '../../services/toastBus';
 import { droit, getCodeRole, getFluxStage, libelleDroits } from '../../data/rbacMatrix';
+import { PRODUCT_FAMILIES_LIST } from '../../data/pharmaceuticalData';
+import SignaturePad, { signatureVide } from '../common/SignaturePad';
 import FluxDocumentsPanel from './FluxDocumentsPanel';
 import FluxPiecePdfModal from './FluxPiecePdfModal';
 
 const STATUTS = {
+  BROUILLON: 'Brouillon',
   SOUMISE_ANTENNE: 'Reçue par l\'antenne',
   EFFECTUEE_CHEF_ANTENNE: 'Effectuée par le chef d\'antenne',
+  PARTIELLEMENT_ANTENNE: 'Prise partielle stock antenne',
+  SATISFAITE_ANTENNE: 'Servie depuis le stock antenne',
+  EN_BC_GLOBAL: 'Incluse dans le BC global',
   TRANSFEREE_SIEGE: 'Transférée au siège',
   PARTIELLEMENT_TRANSMISE: 'Prise en charge partielle',
   PARTIELLEMENT_ARCHIVEE: 'Reliquat (prise partielle)',
@@ -20,6 +26,18 @@ const STATUTS = {
   REJETEE_ANTENNE: 'Rejetée par l\'antenne',
   REJETEE_SIEGE: 'Rejetée par le siège',
 };
+
+const KITS_DEFAUT = [
+  'Kit urgence maternité',
+  'Kit antipaludique ACT',
+  'Kit réanimation',
+  'Kit froid / vaccins',
+  'Kit chirurgie de base',
+  'Kit solutés massifs',
+  'Sans kit (libre)',
+];
+
+const CATEGORIES_VITRINE = PRODUCT_FAMILIES_LIST.filter((f) => f !== 'TOUTES LES FAMILLES');
 
 const ACTIONS = {
   CREATION: 'Commande enregistrée',
@@ -33,7 +51,8 @@ const ACTIONS = {
 
 const FILTRES_ANTENNE = [
   { id: 'tous', label: 'Toutes' },
-  { id: 'RECUE', label: 'À transférer' },
+  { id: 'BROUILLON', label: 'Brouillons' },
+  { id: 'RECUE', label: 'À traiter' },
   { id: 'SIEGE', label: 'Transférées' },
   { id: 'DISPERSEE', label: 'Satisfaites' },
   { id: 'REJETEE', label: 'Rejetées' },
@@ -49,8 +68,12 @@ const FILTRES_SIEGE = [
 ];
 
 const STATUT_STYLE = {
+  BROUILLON: 'bg-slate-100 text-slate-700 border-slate-300',
   SOUMISE_ANTENNE: 'bg-blue-50 text-blue-800 border-blue-200',
   EFFECTUEE_CHEF_ANTENNE: 'bg-indigo-50 text-indigo-800 border-indigo-200',
+  PARTIELLEMENT_ANTENNE: 'bg-teal-50 text-teal-800 border-teal-200',
+  SATISFAITE_ANTENNE: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+  EN_BC_GLOBAL: 'bg-cyan-50 text-cyan-900 border-cyan-200',
   TRANSFEREE_SIEGE: 'bg-amber-50 text-amber-900 border-amber-300',
   PARTIELLEMENT_TRANSMISE: 'bg-sky-50 text-sky-800 border-sky-200',
   PARTIELLEMENT_ARCHIVEE: 'bg-violet-50 text-violet-800 border-violet-200',
@@ -106,12 +129,6 @@ function rangOrigine(type) {
   if (type === 'direction_generale') return '0';
   if (type === 'antenne') return '1';
   return '2';
-}
-
-function libelleOrigine(origine) {
-  if (origine.type === 'direction_generale') return 'Commande de la Direction générale';
-  if (origine.type === 'antenne') return 'Commande générée par l’antenne';
-  return origine.nom;
 }
 
 const STATUTS_PRISE = ['TRANSMISE_SIEGE', 'PARTIELLEMENT_TRANSMISE', 'PARTIELLEMENT_ARCHIVEE', 'PARTIELLEMENT_DISPERSEE', 'DISPERSEE'];
@@ -234,7 +251,8 @@ function PastillesStatut({ commande, stage, compact = false }) {
   );
 }
 
-const STATUTS_A_TRANSFERER = ['SOUMISE_ANTENNE', 'EFFECTUEE_CHEF_ANTENNE'];
+const STATUTS_A_TRANSFERER = ['SOUMISE_ANTENNE', 'EFFECTUEE_CHEF_ANTENNE', 'PARTIELLEMENT_ANTENNE'];
+const STATUTS_PRISE_ANTENNE = ['SOUMISE_ANTENNE', 'EFFECTUEE_CHEF_ANTENNE', 'PARTIELLEMENT_ANTENNE'];
 const STATUTS_AU_SIEGE = ['TRANSFEREE_SIEGE', 'TRANSMISE_SIEGE', 'PARTIELLEMENT_DISPERSEE', 'PARTIELLEMENT_TRANSMISE', 'PARTIELLEMENT_ARCHIVEE', 'DISPERSEE'];
 const STATUTS_PRISE_SIEGE = ['TRANSFEREE_SIEGE', 'TRANSMISE_SIEGE', 'PARTIELLEMENT_ARCHIVEE', 'PARTIELLEMENT_TRANSMISE', 'PARTIELLEMENT_DISPERSEE'];
 
@@ -290,73 +308,52 @@ function comparerCommandesRecentes(a, b) {
 }
 
 /** Hiérarchie année → mois → jour → antenne → demandeur. Même disposition pour tous les profils. */
+/**
+ * Hiérarchie : année → mois → jour → demandeur (nom complet + profil) → commandes tabulées.
+ */
 function construireHierarchieCommandes(liste) {
   const aujourdhui = new Date();
   const parAnnee = new Map();
+
   (liste || []).forEach((commande) => {
     const date = instantCommande(commande);
     const annee = date.getTime() ? date.getFullYear() : aujourdhui.getFullYear();
     const mois = date.getTime() ? date.getMonth() + 1 : aujourdhui.getMonth() + 1;
     const jour = date.getTime() ? date.getDate() : aujourdhui.getDate();
+
     if (!parAnnee.has(annee)) parAnnee.set(annee, new Map());
     const parMois = parAnnee.get(annee);
     if (!parMois.has(mois)) parMois.set(mois, new Map());
     const parJour = parMois.get(mois);
     if (!parJour.has(jour)) parJour.set(jour, new Map());
-    const parAntenne = parJour.get(jour);
-    const antenneId = String(commande.antenne_id || commande.antenne?.id || 0);
-    if (!parAntenne.has(antenneId)) {
-      parAntenne.set(antenneId, {
-        antenne_id: Number(antenneId) || 0,
-        antenne_nom: commande.antenne?.nom || (antenneId !== '0' ? `Antenne #${antenneId}` : 'Antenne'),
-        chef_lieu: commande.antenne?.chef_lieu || null,
-        origines: new Map(),
-      });
-    }
-    const antenne = parAntenne.get(antenneId);
+    const parDemandeur = parJour.get(jour);
+
     const parDg = deLaDirectionGenerale(commande);
     const parAntenneCmd = !parDg && ((commande.partenaire_type || '') === 'ANTENNE' || commande.initiee_par_antenne);
-    const cleOrigine = parDg
+    const cle = parDg
       ? 'direction_generale'
       : (parAntenneCmd
-        ? 'antenne'
+        ? `antenne:${commande.antenne_id || commande.antenne?.id || 0}:${commande.demandeur_user_id || commande.demandeur_nom || 'antenne'}`
         : `demandeur:${commande.demandeur_user_id || String(commande.demandeur_nom || 'n/a').toLowerCase()}`);
-    if (!antenne.origines.has(cleOrigine)) {
-      antenne.origines.set(cleOrigine, {
-        cle: cleOrigine,
+
+    if (!parDemandeur.has(cle)) {
+      const nomComplet = parDg
+        ? 'Direction générale'
+        : (commande.demandeur_nom || (parAntenneCmd ? (commande.transferee_au_siege_par_nom || commande.partenaire_nom || 'Chef d\'antenne') : 'Demandeur'));
+      parDemandeur.set(cle, {
+        cle,
         type: parDg ? 'direction_generale' : (parAntenneCmd ? 'antenne' : 'demandeur'),
-        nom: parDg ? 'Direction générale' : (commande.demandeur_nom || (parAntenneCmd ? 'Antenne' : 'Demandeur')),
-        role: commande.demandeur_role || '',
+        nom_complet: nomComplet,
+        profil: commande.demandeur_role || (parDg ? 'Direction générale' : (parAntenneCmd ? 'Chef d\'antenne' : 'Demandeur')),
         partenaire_nom: commande.partenaire_nom || '',
+        antenne_nom: commande.antenne?.nom || '',
+        antenne_chef_lieu: commande.antenne?.chef_lieu || '',
         commandes: [],
       });
     }
-    antenne.origines.get(cleOrigine).commandes.push(commande);
+    parDemandeur.get(cle).commandes.push(commande);
   });
 
-  const antennesDepuis = (parAntenne) => [...parAntenne.values()]
-    .map((antenne) => {
-      const origines = [...antenne.origines.values()]
-        .map((o) => ({
-          ...o,
-          commandes: [...o.commandes].sort(comparerCommandesRecentes),
-          nb_commandes: o.commandes.length,
-        }))
-        .sort((a, b) => rangOrigine(a.type).localeCompare(rangOrigine(b.type)) || a.nom.localeCompare(b.nom, 'fr'));
-      const commandesAntenne = origines.flatMap((o) => o.commandes);
-      return {
-        antenne_id: antenne.antenne_id,
-        antenne_nom: antenne.antenne_nom,
-        chef_lieu: antenne.chef_lieu,
-        nb_commandes: commandesAntenne.length,
-        en_attente: commandesAntenne.filter((c) => c.statut === 'TRANSFEREE_SIEGE').length,
-        reliquats: commandesAntenne.filter((c) => c.statut === 'PARTIELLEMENT_ARCHIVEE').length,
-        satisfaites: commandesAntenne.filter((c) => c.statut === 'DISPERSEE').length,
-        transferee_par: [...new Set(commandesAntenne.map((c) => c.transferee_au_siege_par_nom).filter(Boolean))],
-        origines,
-      };
-    })
-    .sort((a, b) => a.antenne_nom.localeCompare(b.antenne_nom, 'fr'));
   return [...parAnnee.entries()]
     .sort((a, b) => b[0] - a[0])
     .map(([annee, parMois]) => {
@@ -365,8 +362,15 @@ function construireHierarchieCommandes(liste) {
         .map(([moisNum, parJour]) => {
           const jours = [...parJour.entries()]
             .sort((a, b) => b[0] - a[0])
-            .map(([jourNum, parAntenne]) => {
-              const antennes = antennesDepuis(parAntenne);
+            .map(([jourNum, parDemandeur]) => {
+              const demandeurs = [...parDemandeur.values()]
+                .map((d) => ({
+                  ...d,
+                  commandes: [...d.commandes].sort(comparerCommandesRecentes),
+                  nb_commandes: d.commandes.length,
+                }))
+                .sort((a, b) => rangOrigine(a.type).localeCompare(rangOrigine(b.type))
+                  || a.nom_complet.localeCompare(b.nom_complet, 'fr'));
               const estAujourdhui = annee === aujourdhui.getFullYear()
                 && moisNum === aujourdhui.getMonth() + 1
                 && jourNum === aujourdhui.getDate();
@@ -374,8 +378,8 @@ function construireHierarchieCommandes(liste) {
                 jour: jourNum,
                 libelle: `${jourNum} ${(LIBELLES_MOIS[moisNum] || '').toLowerCase()}`,
                 estAujourdhui,
-                nb_commandes: antennes.reduce((n, a) => n + a.nb_commandes, 0),
-                antennes,
+                nb_commandes: demandeurs.reduce((n, d) => n + d.nb_commandes, 0),
+                demandeurs,
               };
             });
           return {
@@ -579,6 +583,17 @@ export default function FluxApprovisionnement({ activePersona }) {
   const [savingAction, setSavingAction] = useState(false);
   const [piecePdf, setPiecePdf] = useState(null);
   const [docsRefreshKey, setDocsRefreshKey] = useState(0);
+  const [filtreCategorie, setFiltreCategorie] = useState('');
+  const [kitMedical, setKitMedical] = useState('Sans kit (libre)');
+  const [categories, setCategories] = useState(CATEGORIES_VITRINE);
+  const [kits, setKits] = useState(KITS_DEFAUT);
+  const [parDemandeurs, setParDemandeurs] = useState([]);
+  const [alertesRupture, setAlertesRupture] = useState([]);
+  const [dateLivraisonPrevue, setDateLivraisonPrevue] = useState('');
+  const [selectionBc, setSelectionBc] = useState(() => new Set());
+  const [bcGlobaux, setBcGlobaux] = useState([]);
+  const [vueChef, setVueChef] = useState('demandeurs'); // demandeurs | chronologie | bc
+  const [modalSignatureBl, setModalSignatureBl] = useState(null);
 
   const codeRoleCompte = role || activePersona?.codeRole || activePersona?.code_role;
   const estChefAntenne = ['CHEF_ANTENNE_PROVINCIALE', 'PHARMACIEN_CHEF_ANTENNE'].includes(codeRoleCompte);
@@ -638,6 +653,7 @@ export default function FluxApprovisionnement({ activePersona }) {
       setStage(suivant.stage);
       setCommandes(suivant.commandes);
       setCompteurs(suivant.compteurs);
+      setParDemandeurs(flux.par_demandeurs || []);
       setAntenneCompte(suivant.antenneCompte);
       setStructureCompte(suivant.structureCompte);
       setPeutSupprimer(suivant.peutSupprimer);
@@ -645,17 +661,33 @@ export default function FluxApprovisionnement({ activePersona }) {
       let antennesSuivantes;
       let produitsSuivants;
       if (!silent) {
-        const [ants, meds] = await Promise.allSettled([
+        const [ants, meds, cats, stock, bc] = await Promise.allSettled([
           apiRequest('/antennes'),
           apiRequest('/pharmacy/produits'),
+          apiRequest('/flux/categories'),
+          apiRequest('/flux/stock-antenne'),
+          apiRequest('/flux/bc-globaux'),
         ]);
         if (ants.status === 'fulfilled') {
           antennesSuivantes = ants.value.antennes || [];
           setAntennes(antennesSuivantes);
         }
         if (meds.status === 'fulfilled') {
-          produitsSuivants = (meds.value.produits || []).slice(0, 80);
+          produitsSuivants = meds.value.produits || [];
           setProduits(produitsSuivants);
+        }
+        if (cats.status === 'fulfilled') {
+          if (cats.value.categories?.length) setCategories(cats.value.categories);
+          if (cats.value.kits_medicaux?.length) setKits(cats.value.kits_medicaux);
+        }
+        if (stock.status === 'fulfilled') {
+          setAlertesRupture(stock.value.alertes_rupture || []);
+          if (stock.value.date_livraison_prevue) {
+            setDateLivraisonPrevue(String(stock.value.date_livraison_prevue).slice(0, 10));
+          }
+        }
+        if (bc.status === 'fulfilled') {
+          setBcGlobaux(bc.value.bc_globaux || []);
         }
       }
       const precedent = cacheFlux.get(cleCompte) || {};
@@ -779,8 +811,9 @@ export default function FluxApprovisionnement({ activePersona }) {
     setSelections((prev) => ({ ...prev, [produitId]: qte }));
   }
 
-  async function envoyerCommande(event) {
-    event.preventDefault();
+  async function envoyerCommande(event, options = {}) {
+    event?.preventDefault?.();
+    const enBrouillon = Boolean(options.brouillon);
     const lignesSelections = Object.entries(selections)
       .filter(([, qte]) => qte > 0)
       .map(([produitId, qte]) => {
@@ -790,6 +823,7 @@ export default function FluxApprovisionnement({ activePersona }) {
           produit_id: Number(produitId),
           quantite_demandee: qte,
           designation: p?.designation || deja?.designation || 'Médicament',
+          categorie: p?.categorie || filtreCategorie || null,
         };
       });
     if (!lignesSelections.length) {
@@ -800,35 +834,113 @@ export default function FluxApprovisionnement({ activePersona }) {
     setError('');
     const edition = commandeEdition;
     try {
-      await apiRequest(edition ? `/flux/commandes/${edition.id}` : '/flux/commandes', {
-        method: edition ? 'PUT' : 'POST',
-        body: JSON.stringify(edition
-          ? { motif, lignes: lignesSelections }
-          : {
-            antenne_id: Number(estDirectionGenerale ? antenneId : (antenneCompte?.id || antenneDuCompte || antenneId)),
-            partenaire_nom: estDirectionGenerale ? 'Direction générale' : (estChefAntenne ? nomChef : partenaire),
-            partenaire_type: estDirectionGenerale ? 'DIRECTION_GENERALE' : (estChefAntenne ? 'ANTENNE' : 'PHARMACIE'),
-            motif,
-            lignes: lignesSelections,
-          }),
-      });
+      if (edition?.statut === 'BROUILLON' && !enBrouillon && options.envoyer) {
+        await apiRequest(`/flux/commandes/${edition.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ motif, lignes: lignesSelections }),
+        });
+        await apiRequest(`/flux/commandes/${edition.id}/envoyer`, { method: 'POST', body: JSON.stringify({}) });
+        pushToast(`Demande ${edition.numero_commande} envoyée au chef d'antenne.`);
+      } else {
+        await apiRequest(edition ? `/flux/commandes/${edition.id}` : '/flux/commandes', {
+          method: edition ? 'PUT' : 'POST',
+          body: JSON.stringify(edition
+            ? { motif, lignes: lignesSelections }
+            : {
+              antenne_id: Number(estDirectionGenerale ? antenneId : (antenneCompte?.id || antenneDuCompte || antenneId)),
+              partenaire_nom: estDirectionGenerale ? 'Direction générale' : (estChefAntenne ? nomChef : partenaire),
+              partenaire_type: estDirectionGenerale ? 'DIRECTION_GENERALE' : (estChefAntenne ? 'ANTENNE' : 'PHARMACIE'),
+              motif,
+              categorie: filtreCategorie || null,
+              kit_medical: kitMedical || null,
+              brouillon: enBrouillon && estDemandeur,
+              date_livraison_prevue: dateLivraisonPrevue || null,
+              lignes: lignesSelections,
+            }),
+        });
+        if (edition) {
+          pushToast(`Demande ${edition.numero_commande} modifiée.`);
+        } else if (enBrouillon) {
+          pushToast('Demande enregistrée en brouillon.');
+        } else if (estChefAntenne) {
+          pushToast('Bon enregistré et transféré à la Direction générale.');
+        } else {
+          pushToast('Demande envoyée au chef d\'antenne.');
+        }
+      }
       setSelections({});
       setRechercheMed('');
       setMotif('');
       setPartenaire('');
+      setFiltreCategorie('');
+      setKitMedical('Sans kit (libre)');
       setCommandeEdition(null);
       setModalOuvert(false);
-      if (edition) {
-        pushToast(`Demande ${edition.numero_commande} modifiée.`);
-      } else if (estChefAntenne) {
-        pushToast('Bon enregistré et transféré à la Direction générale.');
-      }
       await load();
     } catch (err) {
       setError(err?.backendUnavailable ? '' : err.message);
     } finally {
       setSaving(false);
     }
+  }
+
+  async function envoyerBrouillonExistant(commande) {
+    try {
+      await apiRequest(`/flux/commandes/${commande.id}/envoyer`, { method: 'POST', body: JSON.stringify({}) });
+      pushToast(`${commande.numero_commande} envoyée au chef d'antenne.`);
+      await load();
+    } catch (err) {
+      setError(err?.backendUnavailable ? '' : err.message);
+    }
+  }
+
+  async function constituerBcGlobal() {
+    const ids = [...selectionBc];
+    if (!ids.length) {
+      pushToast('Sélectionnez au moins une demande.');
+      return;
+    }
+    try {
+      const res = await apiRequest('/flux/bc-globaux', {
+        method: 'POST',
+        body: JSON.stringify({
+          commande_ids: ids,
+          date_livraison_prevue: dateLivraisonPrevue || undefined,
+        }),
+      });
+      pushToast(`BC global ${res.bc_global?.numero} constitué (${res.bc_global?.nb_demandeurs || 0} demandeurs).`);
+      setSelectionBc(new Set());
+      await load();
+    } catch (err) {
+      setError(err?.backendUnavailable ? '' : err.message);
+    }
+  }
+
+  async function transfererBcGlobal(bc) {
+    const ok = await askConfirm({
+      message: `Transférer ${bc.numero} au siège ? Le détail par demandeur reste à l'antenne.`,
+      confirmLabel: 'Transférer',
+    });
+    if (!ok) return;
+    try {
+      await apiRequest(`/flux/bc-globaux/${bc.id}/transferer`, {
+        method: 'POST',
+        body: JSON.stringify({ date_livraison_prevue: dateLivraisonPrevue || undefined }),
+      });
+      pushToast(`${bc.numero} transmis au siège (agrégé).`);
+      await load();
+    } catch (err) {
+      setError(err?.backendUnavailable ? '' : err.message);
+    }
+  }
+
+  async function genererBlSigne(commande) {
+    setModalSignatureBl({
+      commande,
+      mode: 'NUMERIQUE',
+      signataire: activePersona?.nom || activePersona?.name || '',
+      signature: '',
+    });
   }
 
   /** Transfert simple antenne → siège (pas de choix de quantités). */
@@ -855,10 +967,18 @@ export default function FluxApprovisionnement({ activePersona }) {
   }
 
   /** Ouvre le modal de prise en charge (siège) ou de dispersion (siège). */
+  function maxActionLigne(type, row) {
+    if (type === 'prise_antenne') {
+      return Math.max(0, Number(row.quantite_demandee || 0) - Number(row.quantite_prise_antenne || 0));
+    }
+    if (type === 'prise') return reliquatLigne(row);
+    return resteDispersionLigne(row);
+  }
+
   function ouvrirAction(type, commande) {
     const initial = {};
     (commande.lignes || []).forEach((row) => {
-      const max = type === 'prise' ? reliquatLigne(row) : resteDispersionLigne(row);
+      const max = maxActionLigne(type, row);
       initial[row.id] = max > 0 ? max : 0;
     });
     setQuantitesAction(initial);
@@ -876,8 +996,7 @@ export default function FluxApprovisionnement({ activePersona }) {
     if (!modalAction) return;
     const initial = {};
     (modalAction.commande.lignes || []).forEach((row) => {
-      const max = modalAction.type === 'prise' ? reliquatLigne(row) : resteDispersionLigne(row);
-      initial[row.id] = max;
+      initial[row.id] = maxActionLigne(modalAction.type, row);
     });
     setQuantitesAction(initial);
   }
@@ -922,6 +1041,12 @@ export default function FluxApprovisionnement({ activePersona }) {
             : `Prise en charge enregistrée pour ${commande.numero_commande}.`
         );
         setDocsRefreshKey((k) => k + 1);
+      } else if (type === 'prise_antenne') {
+        await apiRequest(`/flux/commandes/${commande.id}/prise-antenne`, {
+          method: 'POST',
+          body: JSON.stringify({ lignes, note: noteAction || undefined }),
+        });
+        pushToast(`Prise en charge stock antenne pour ${commande.numero_commande}.`);
       } else {
         const res = await apiRequest(`/flux/commandes/${commande.id}/disperser`, {
           method: 'POST',
@@ -939,6 +1064,15 @@ export default function FluxApprovisionnement({ activePersona }) {
             : `Dispersion enregistrée pour ${commande.numero_commande}.`
         );
         setDocsRefreshKey((k) => k + 1);
+        setModalAction(null);
+        await load();
+        setModalSignatureBl({
+          commande: res?.commande || commande,
+          mode: 'NUMERIQUE',
+          signataire: activePersona?.nom || activePersona?.name || '',
+          signature: '',
+        });
+        return;
       }
       setModalAction(null);
       await load();
@@ -994,6 +1128,7 @@ export default function FluxApprovisionnement({ activePersona }) {
     const q = recherche.trim().toLowerCase();
     return commandes.filter((commande) => {
       if (filtre === 'REJETEE' && !String(commande.statut || '').startsWith('REJETEE')) return false;
+      if (filtre === 'BROUILLON' && commande.statut !== 'BROUILLON') return false;
       if (filtre === 'RECUE' && !STATUTS_A_TRANSFERER.includes(commande.statut)) return false;
       if (filtre === 'SIEGE' && !STATUTS_AU_SIEGE.includes(commande.statut)) return false;
       if (filtre === 'EN_ATTENTE' && commande.statut !== 'TRANSFEREE_SIEGE') return false;
@@ -1042,6 +1177,7 @@ export default function FluxApprovisionnement({ activePersona }) {
   function compteFiltre(id) {
     if (id === 'tous') return commandes.length;
     if (id === 'REJETEE') return commandes.filter((c) => String(c.statut || '').startsWith('REJETEE')).length;
+    if (id === 'BROUILLON') return commandes.filter((c) => c.statut === 'BROUILLON').length;
     if (id === 'RECUE') return commandes.filter((c) => STATUTS_A_TRANSFERER.includes(c.statut)).length;
     if (id === 'SIEGE') return commandes.filter((c) => STATUTS_AU_SIEGE.includes(c.statut)).length;
     if (id === 'EN_ATTENTE') return commandes.filter((c) => c.statut === 'TRANSFEREE_SIEGE').length;
@@ -1054,6 +1190,10 @@ export default function FluxApprovisionnement({ activePersona }) {
   function actionsCommande(commande) {
     const lignes = commande.lignes || [];
     const aTransferer = peutTransferer && STATUTS_A_TRANSFERER.includes(commande.statut);
+    const aPrendreAntenne = estChefAntenne
+      && STATUTS_PRISE_ANTENNE.includes(commande.statut)
+      && lignes.some((row) => Math.max(0, Number(row.quantite_demandee || 0) - Number(row.quantite_prise_antenne || 0)) > 0);
+    const aEnvoyerBrouillon = estDemandeur && commande.statut === 'BROUILLON';
     const aPrendre = peutPrendreCharge
       && STATUTS_PRISE_SIEGE.includes(commande.statut)
       && lignes.some((row) => reliquatLigne(row) > 0);
@@ -1061,7 +1201,8 @@ export default function FluxApprovisionnement({ activePersona }) {
       && STATUTS_PRISE_SIEGE.includes(commande.statut)
       && lignes.some((row) => resteDispersionLigne(row) > 0);
     const aRejeter = aTransferer || aPrendre || (peutDisperser && STATUTS_AU_SIEGE.includes(commande.statut) && !String(commande.statut).startsWith('REJETEE'));
-    return { aTransferer, aPrendre, aDisperser, aRejeter };
+    const aBl = commandeDispersee(commande) || commande.statut === 'SATISFAITE_ANTENNE';
+    return { aTransferer, aPrendreAntenne, aEnvoyerBrouillon, aPrendre, aDisperser, aRejeter, aBl };
   }
 
   function basculerAnnee(annee) {
@@ -1140,6 +1281,33 @@ export default function FluxApprovisionnement({ activePersona }) {
             {(demandeEditable(commande) || peutSupprimer) && (
               <BoutonSupprimer titre="Supprimer la demande" onClick={() => supprimerCommande(commande)} />
             )}
+            {act.aEnvoyerBrouillon && (
+              <button type="button" onClick={() => envoyerBrouillonExistant(commande)} className="px-2 py-1 font-bold rounded bg-[#00A651] text-white">
+                Envoyer au chef
+              </button>
+            )}
+            {act.aPrendreAntenne && (
+              <button type="button" onClick={() => ouvrirAction('prise_antenne', commande)} className="px-2 py-1 font-bold rounded bg-teal-700 text-white">
+                Stock antenne
+              </button>
+            )}
+            {estChefAntenne && STATUTS_A_TRANSFERER.includes(commande.statut) && (
+              <label className="inline-flex items-center gap-1 px-1.5 text-[10px] text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={selectionBc.has(commande.id)}
+                  onChange={(e) => {
+                    setSelectionBc((prev) => {
+                      const next = new Set(prev);
+                      if (e.target.checked) next.add(commande.id);
+                      else next.delete(commande.id);
+                      return next;
+                    });
+                  }}
+                />
+                BC global
+              </label>
+            )}
             {act.aTransferer && (
               <button
                 type="button"
@@ -1155,6 +1323,11 @@ export default function FluxApprovisionnement({ activePersona }) {
             )}
             {act.aDisperser && (
               <button type="button" onClick={() => ouvrirAction('dispersion', commande)} className="px-2 py-1 font-bold rounded bg-[#0E2A4F] text-white">Disperser</button>
+            )}
+            {act.aBl && (
+              <button type="button" onClick={() => genererBlSigne(commande)} className="px-2 py-1 font-bold rounded border border-slate-400 text-slate-700">
+                BL signé
+              </button>
             )}
             {act.aRejeter && (
               <button type="button" onClick={() => rejeter(commande)} className="px-2 py-1 font-bold rounded border border-rose-300 text-rose-700">Rejeter</button>
@@ -1180,10 +1353,16 @@ export default function FluxApprovisionnement({ activePersona }) {
             </div>
             <p className="text-[11px] text-slate-500 mt-0.5">
               {commandesVisibles.length} affichée{commandesVisibles.length > 1 ? 's' : ''} sur {commandes.length}
-              {estDemandeur ? ' — évolution du statut de vos demandes' : ''}
-              {estChefAntenne ? ' — évolution du statut pour tous les demandeurs de votre antenne' : ''}
+              {estDemandeur ? ' — brouillon puis envoi au chef d\'antenne' : ''}
+              {estChefAntenne ? ' — organisées par demandeur · stock local · BC global' : ''}
               {(estDirectionGenerale || estSupervision) && estVueSiege ? ' — année, mois, jour, les plus récentes en haut' : ''}
             </p>
+            {alertesRupture.length > 0 && estChefAntenne && (
+              <p className="mt-1 text-[11px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 inline-block">
+                {alertesRupture.length} alerte{alertesRupture.length > 1 ? 's' : ''} rupture / stock critique
+                {dateLivraisonPrevue ? ` · prochaine livraison ${dateLivraisonPrevue}` : ''}
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {(estVueSiege
@@ -1214,6 +1393,11 @@ export default function FluxApprovisionnement({ activePersona }) {
             <button type="button" onClick={() => load()} disabled={loading || rafraichit} className="w-8 h-8 inline-flex items-center justify-center rounded border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-60" title="Actualiser les commandes" aria-label="Actualiser les commandes">
               <RefreshCw className={`w-3.5 h-3.5 ${(loading || rafraichit) ? 'animate-spin' : ''}`} />
             </button>
+            {estChefAntenne && selectionBc.size > 0 && (
+              <button type="button" onClick={constituerBcGlobal} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded bg-cyan-700 text-white">
+                BC global ({selectionBc.size})
+              </button>
+            )}
             {peutCommander && (
               <button type="button" onClick={ouvrirDemande} className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded bg-[#0E2A4F] text-white">
                 <Plus className="w-3.5 h-3.5" />
@@ -1222,6 +1406,34 @@ export default function FluxApprovisionnement({ activePersona }) {
             )}
           </div>
         </div>
+
+        {estChefAntenne && ongletFlux === 'commandes' && (
+          <div className="shrink-0 px-4 pt-2 flex flex-wrap gap-1">
+            {[
+              { id: 'demandeurs', label: 'Par demandeur' },
+              { id: 'chronologie', label: 'Chronologie' },
+              { id: 'bc', label: `BC globaux (${bcGlobaux.length})` },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setVueChef(tab.id)}
+                className={`px-2.5 py-1 rounded text-[11px] font-bold border ${vueChef === tab.id ? 'bg-[#0E2A4F] text-white border-[#0E2A4F]' : 'bg-white text-slate-600 border-slate-200'}`}
+              >
+                {tab.label}
+              </button>
+            ))}
+            <label className="ml-auto text-[11px] text-slate-600 flex items-center gap-1">
+              Prochaine livraison
+              <input
+                type="date"
+                value={dateLivraisonPrevue}
+                onChange={(e) => setDateLivraisonPrevue(e.target.value)}
+                className="border border-slate-200 rounded px-2 py-0.5 text-[11px]"
+              />
+            </label>
+          </div>
+        )}
 
         <div className="shrink-0 px-4 pt-3 border-b border-slate-100">
           <div className="flex flex-wrap gap-1 p-0.5 rounded-md bg-slate-100 border border-slate-200 w-fit">
@@ -1291,10 +1503,84 @@ export default function FluxApprovisionnement({ activePersona }) {
                   </p>
                 )}
 
-                {!loading && hierarchiePage.length > 0 && (
+                {!loading && estChefAntenne && vueChef === 'demandeurs' && (
                   <div className="p-3 space-y-3">
                     <p className="text-[11px] text-slate-500 px-1">
-                      Classement année → mois → jour, les plus récentes en haut. Seul le bandeau année se plie / déplie.
+                      Par demandeur : nom complet et profil visibles, puis commandes tabulées en dessous.
+                    </p>
+                    {(parDemandeurs.length ? parDemandeurs : []).map((bloc) => (
+                      <div key={bloc.demandeur_user_id || bloc.demandeur_nom} className="border border-slate-200 rounded-md bg-white overflow-hidden">
+                        <div className="px-3 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold text-slate-900 leading-snug">{bloc.demandeur_nom || 'Demandeur'}</p>
+                            <p className="mt-0.5 text-[11px] text-slate-600">
+                              {[bloc.demandeur_role, bloc.partenaire_nom].filter(Boolean).join(' · ') || 'Profil demandeur'}
+                            </p>
+                          </div>
+                          <p className="text-[10px] font-semibold text-amber-800 shrink-0">
+                            {bloc.a_transferer} à traiter · {bloc.nb_commandes} demande{bloc.nb_commandes > 1 ? 's' : ''}
+                          </p>
+                        </div>
+                        <div className="ml-3 border-l-2 border-slate-200 pl-3 py-2 space-y-1.5">
+                          {(bloc.commandes || [])
+                            .filter((c) => commandesVisibles.some((v) => v.id === c.id))
+                            .map((commande) => (
+                              <CarteCommande key={commande.id} commande={commande} />
+                            ))}
+                        </div>
+                      </div>
+                    ))}
+                    {!parDemandeurs.length && (
+                      <p className="text-xs text-slate-500 text-center py-6">Aucune demande regroupée pour l’instant.</p>
+                    )}
+                  </div>
+                )}
+
+                {!loading && estChefAntenne && vueChef === 'bc' && (
+                  <div className="p-3 space-y-3">
+                    <p className="text-[11px] text-slate-500 px-1">
+                      BC global antenne : détail demandeurs visible ici. Au transfert siège, seul l’agrégat produit est envoyé.
+                    </p>
+                    {bcGlobaux.map((bc) => (
+                      <div key={bc.id} className="border border-slate-200 rounded-md bg-white p-3 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-bold font-mono text-slate-900">{bc.numero}</p>
+                            <p className="text-[11px] text-slate-500">
+                              {bc.nb_demandes} demandes · {bc.nb_demandeurs} demandeurs · {bc.quantite_totale} u. · {Number(bc.montant_total_xaf || 0).toLocaleString('fr-FR')} XAF
+                            </p>
+                            <p className="text-[10px] text-slate-500">Statut {bc.statut}{bc.date_livraison_prevue ? ` · livraison prévue ${bc.date_livraison_prevue}` : ''}</p>
+                          </div>
+                          {bc.statut !== 'TRANSFERE_SIEGE' && (
+                            <button type="button" onClick={() => transfererBcGlobal(bc)} className="px-2.5 py-1.5 text-[11px] font-bold rounded bg-amber-600 text-white">
+                              Transférer au siège
+                            </button>
+                          )}
+                        </div>
+                        <ul className="text-[11px] space-y-1 border-t border-slate-100 pt-2">
+                          {(bc.lignes || []).map((l) => (
+                            <li key={l.id} className="flex flex-col gap-0.5">
+                              <span className="font-semibold text-slate-800">{l.designation} × {l.quantite}</span>
+                              {(l.details_demandeurs || []).length > 0 && (
+                                <span className="text-[10px] text-slate-500 pl-2">
+                                  {(l.details_demandeurs || []).map((d) => `${d.demandeur_nom} (${d.quantite})`).join(' · ')}
+                                </span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                    {!bcGlobaux.length && (
+                      <p className="text-xs text-slate-500 text-center py-6">Aucun BC global. Cochez des demandes puis « BC global ».</p>
+                    )}
+                  </div>
+                )}
+
+                {!loading && hierarchiePage.length > 0 && (!estChefAntenne || vueChef === 'chronologie') && (
+                  <div className="p-3 space-y-3">
+                    <p className="text-[11px] text-slate-500 px-1">
+                      Classement année → mois → jour → demandeur (nom + profil), puis commandes tabulées. Seul le bandeau année se plie / déplie.
                     </p>
                     {hierarchiePage.map((anneeBloc) => {
                       const ouverte = !anneesRepliees.has(anneeBloc.annee);
@@ -1329,57 +1615,36 @@ export default function FluxApprovisionnement({ activePersona }) {
                                           )}
                                           <span className="ml-2 font-semibold text-slate-500">— {jourBloc.nb_commandes} commande{jourBloc.nb_commandes > 1 ? 's' : ''}</span>
                                         </p>
-                                        <div className="ml-3 border-l-2 border-slate-200 pl-3 space-y-3">
-                                    {(jourBloc.antennes || []).map((antenne) => {
-                                      const transferes = (antenne.transferee_par || []).filter(Boolean);
-                                      return (
-                                        <div key={antenne.antenne_id || antenne.antenne_nom} className="space-y-2">
-                                          <div>
-                                            <p className="text-[11px] font-bold text-slate-900">
-                                              {antenne.antenne_nom}{antenne.chef_lieu ? ` — ${antenne.chef_lieu}` : ''}
-                                            </p>
-                                            {(estVueSiege || transferes.length > 0) && (
-                                              <p className="text-[10px] text-amber-800">
-                                                {transferes.length ? `Transférée par ${transferes.join(', ')} · ` : ''}
-                                                <span className="text-amber-700">{antenne.en_attente} attente</span>
-                                                {' · '}
-                                                <span className="text-violet-700">{antenne.reliquats} reliquat{antenne.reliquats > 1 ? 's' : ''}</span>
-                                                {' · '}
-                                                <span className="text-emerald-700">{antenne.satisfaites} satisfaite{antenne.satisfaites > 1 ? 's' : ''}</span>
-                                              </p>
-                                            )}
-                                          </div>
-                                          <div className="ml-4 border-l-2 border-blue-200 pl-3 space-y-3">
-                                            {(antenne.origines || []).map((origine) => {
-                                              const parAntenne = origine.type === 'antenne';
-                                              const parDg = origine.type === 'direction_generale';
-                                              return (
-                                                <div key={origine.cle} className="space-y-1.5">
-                                                  <p className={`text-[11px] font-semibold ${parDg ? 'text-[#0E2A4F]' : parAntenne ? 'text-indigo-800' : 'text-slate-800'}`}>
-                                                    {libelleOrigine(origine)}
-                                                    <span className="font-normal text-slate-500"> — {origine.nb_commandes}</span>
+                                        <div className="ml-3 border-l-2 border-blue-200 pl-3 space-y-3">
+                                          {(jourBloc.demandeurs || []).map((demandeur) => {
+                                            const parDg = demandeur.type === 'direction_generale';
+                                            const parAntenne = demandeur.type === 'antenne';
+                                            const profilLigne = [
+                                              demandeur.profil,
+                                              demandeur.partenaire_nom,
+                                              demandeur.antenne_nom
+                                                ? `passée à l’antenne ${demandeur.antenne_nom}${demandeur.antenne_chef_lieu ? ` — ${demandeur.antenne_chef_lieu}` : ''}`
+                                                : null,
+                                            ].filter(Boolean).join(' · ');
+                                            return (
+                                              <div key={demandeur.cle} className="space-y-1.5">
+                                                <div className="rounded-md bg-white border border-slate-200 px-3 py-2">
+                                                  <p className={`text-sm font-bold leading-snug ${parDg ? 'text-[#0E2A4F]' : parAntenne ? 'text-indigo-900' : 'text-slate-900'}`}>
+                                                    {demandeur.nom_complet}
+                                                    <span className="ml-2 text-[11px] font-semibold text-slate-500">— {demandeur.nb_commandes}</span>
                                                   </p>
-                                                  {parDg && (
-                                                    <p className="text-[10px] text-slate-500">Passée par la Direction générale à l’antenne {antenne.antenne_nom}</p>
+                                                  {profilLigne && (
+                                                    <p className="mt-0.5 text-[11px] text-slate-600">{profilLigne}</p>
                                                   )}
-                                                  {parAntenne && (
-                                                    <p className="text-[10px] text-indigo-700">Passée par l’antenne {antenne.antenne_nom}{origine.nom ? ` · ${origine.nom}` : ''}</p>
-                                                  )}
-                                                  {!parAntenne && !parDg && origine.role && (
-                                                    <p className="text-[10px] text-slate-500">{origine.role}{origine.partenaire_nom ? ` · ${origine.partenaire_nom}` : ''} · passée à l’antenne {antenne.antenne_nom}</p>
-                                                  )}
-                                                  <div className="space-y-1.5">
-                                                    {(origine.commandes || []).map((commande) => (
-                                                      <CarteCommande key={commande.id} commande={commande} />
-                                                    ))}
-                                                  </div>
                                                 </div>
-                                              );
-                                            })}
-                                          </div>
-                                        </div>
-                                      );
-                                    })}
+                                                <div className="ml-4 border-l-2 border-slate-200 pl-3 space-y-1.5">
+                                                  {(demandeur.commandes || []).map((commande) => (
+                                                    <CarteCommande key={commande.id} commande={commande} />
+                                                  ))}
+                                                </div>
+                                              </div>
+                                            );
+                                          })}
                                         </div>
                                       </div>
                                     ))}
@@ -1655,12 +1920,17 @@ export default function FluxApprovisionnement({ activePersona }) {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-bold text-slate-900">
-                  {modalAction.type === 'prise' ? 'Prise en charge' : 'Dispersion'} — {modalAction.commande.numero_commande}
+                  {modalAction.type === 'prise_antenne'
+                    ? 'Prise stock antenne'
+                    : (modalAction.type === 'prise' ? 'Prise en charge siège' : 'Dispersion')}
+                  {' — '}{modalAction.commande.numero_commande}
                 </h2>
                 <p className="text-[11px] text-slate-500 mt-0.5">
-                  {modalAction.type === 'prise'
-                    ? 'Indiquez la quantité à engager maintenant. Le reste est archivé et pourra être pris en charge au prochain arrivage.'
-                    : 'Dispersez tout ou une partie des quantités déjà prises en charge. Le solde pourra être traité plus tard.'}
+                  {modalAction.type === 'prise_antenne'
+                    ? 'Servez depuis le stock de votre antenne. Le reliquat pourra entrer dans le BC global vers le siège.'
+                    : (modalAction.type === 'prise'
+                      ? 'Indiquez la quantité à engager maintenant. Le reste est archivé et pourra être pris en charge au prochain arrivage.'
+                      : 'Dispersez tout ou une partie des quantités déjà prises en charge. Un bon de livraison signé sera proposé ensuite.')}
                 </p>
               </div>
               <button type="button" disabled={savingAction} onClick={() => setModalAction(null)} className="p-1 rounded text-slate-500 hover:bg-slate-100" aria-label="Fermer">
@@ -1678,7 +1948,7 @@ export default function FluxApprovisionnement({ activePersona }) {
             </div>
             <ul className="border border-slate-200 rounded divide-y divide-slate-100">
               {(modalAction.commande.lignes || []).map((row) => {
-                const max = modalAction.type === 'prise' ? reliquatLigne(row) : resteDispersionLigne(row);
+                const max = maxActionLigne(modalAction.type, row);
                 const disabled = max <= 0;
                 return (
                   <li key={row.id} className={`flex flex-wrap items-center gap-3 px-3 py-2.5 ${disabled ? 'bg-slate-50 opacity-70' : ''}`}>
@@ -1721,7 +1991,11 @@ export default function FluxApprovisionnement({ activePersona }) {
             <div className="flex justify-end gap-2 pt-1">
               <button type="button" disabled={savingAction} onClick={() => setModalAction(null)} className="px-3 py-2 text-xs font-bold rounded border border-slate-300 text-slate-700">Annuler</button>
               <button type="button" disabled={savingAction} onClick={confirmerAction} className="px-3 py-2 text-xs font-bold rounded bg-[#0E2A4F] text-white">
-                {savingAction ? 'Enregistrement…' : (modalAction.type === 'prise' ? 'Confirmer la prise en charge' : 'Confirmer la dispersion')}
+                {savingAction
+                  ? 'Enregistrement…'
+                  : (modalAction.type === 'prise_antenne'
+                    ? 'Confirmer (stock antenne)'
+                    : (modalAction.type === 'prise' ? 'Confirmer la prise en charge' : 'Confirmer la dispersion'))}
               </button>
             </div>
           </div>
@@ -1786,12 +2060,44 @@ export default function FluxApprovisionnement({ activePersona }) {
               Motif
               <input value={motif} onChange={(e) => setMotif(e.target.value)} className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm" />
             </label>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label className="text-xs text-slate-600">
+                Catégorie (vitrine produits)
+                <select
+                  value={filtreCategorie}
+                  onChange={(e) => setFiltreCategorie(e.target.value)}
+                  className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm bg-white"
+                >
+                  <option value="">Toutes les catégories</option>
+                  {categories.map((cat) => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-slate-600">
+                Kit médical
+                <select
+                  value={kitMedical}
+                  onChange={(e) => setKitMedical(e.target.value)}
+                  className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm bg-white"
+                >
+                  {kits.map((kit) => (
+                    <option key={kit} value={kit}>{kit}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
             {/* ── Sélection multi-médicaments ── */}
             {(() => {
               const termeMed = rechercheMed.trim().toLowerCase();
-              const produitsFiltres = produits.filter((p) =>
-                !termeMed || p.designation.toLowerCase().includes(termeMed)
-              );
+              const produitsFiltres = produits.filter((p) => {
+                const okTexte = !termeMed || (p.designation || '').toLowerCase().includes(termeMed)
+                  || (p.categorie || '').toLowerCase().includes(termeMed);
+                const okCat = !filtreCategorie
+                  || (p.categorie || '').toLowerCase() === filtreCategorie.toLowerCase()
+                  || (p.famille || '').toLowerCase() === filtreCategorie.toLowerCase();
+                return okTexte && okCat;
+              });
               const nbSelectionnes = Object.keys(selections).length;
               return (
                 <div className="space-y-1.5">
@@ -1880,11 +2186,125 @@ export default function FluxApprovisionnement({ activePersona }) {
                 </div>
               );
             })()}
-            <div className="flex justify-end gap-2 pt-1">
+            <div className="flex flex-wrap justify-end gap-2 pt-1">
               <button type="button" onClick={fermerDemande} className="px-3 py-2 text-xs font-bold rounded border border-slate-300 text-slate-700">Annuler</button>
-              <button disabled={saving} className="px-3 py-2 text-xs font-bold rounded bg-[#0E2A4F] text-white">{saving ? 'Envoi…' : (commandeEdition ? 'Enregistrer les modifications' : 'Enregistrer la demande')}</button>
+              {estDemandeur && !commandeEdition && (
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={(e) => envoyerCommande(e, { brouillon: true })}
+                  className="px-3 py-2 text-xs font-bold rounded border border-slate-400 text-slate-800"
+                >
+                  {saving ? '…' : 'Enregistrer brouillon'}
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={saving}
+                onClick={(e) => envoyerCommande(e, {
+                  brouillon: false,
+                  envoyer: commandeEdition?.statut === 'BROUILLON',
+                })}
+                className="px-3 py-2 text-xs font-bold rounded bg-[#0E2A4F] text-white"
+              >
+                {saving
+                  ? 'Envoi…'
+                  : (commandeEdition
+                    ? (commandeEdition.statut === 'BROUILLON' ? 'Modifier & envoyer au chef' : 'Enregistrer les modifications')
+                    : (estDemandeur ? 'Envoyer au chef d\'antenne' : 'Enregistrer la demande'))}
+              </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {modalSignatureBl && (
+        <div className="fixed inset-0 z-[95] bg-slate-900/50 flex items-center justify-center p-4" onMouseDown={() => setModalSignatureBl(null)}>
+          <div onMouseDown={(e) => e.stopPropagation()} className="w-full max-w-lg bg-white border border-slate-200 rounded-md p-4 space-y-3 shadow-xl">
+            <h2 className="text-sm font-bold text-slate-900">Bon de livraison — signature</h2>
+            <p className="text-[11px] text-slate-500">
+              Signez directement dans l’application après dispersion / livraison pour {modalSignatureBl.commande?.numero_commande || 'la commande'}.
+            </p>
+            <label className="block text-xs text-slate-600">
+              Mode
+              <select
+                value={modalSignatureBl.mode}
+                onChange={(e) => setModalSignatureBl((prev) => ({ ...prev, mode: e.target.value, signature: '' }))}
+                className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm"
+              >
+                <option value="NUMERIQUE">Signature manuscrite (pad)</option>
+                <option value="MANUSCRITE">Visa texte (saisie)</option>
+              </select>
+            </label>
+            <label className="block text-xs text-slate-600">
+              Signataire
+              <input
+                value={modalSignatureBl.signataire}
+                onChange={(e) => setModalSignatureBl((prev) => ({ ...prev, signataire: e.target.value }))}
+                className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm"
+                placeholder="Nom du réceptionnaire"
+              />
+            </label>
+            {modalSignatureBl.mode === 'NUMERIQUE' ? (
+              <SignaturePad
+                key={`pad-${modalSignatureBl.commande?.id || 'bl'}`}
+                height={180}
+                label="Dessinez votre signature (souris ou doigt)"
+                onChange={(dataUrl) => setModalSignatureBl((prev) => ({ ...prev, signature: dataUrl }))}
+              />
+            ) : (
+              <label className="block text-xs text-slate-600">
+                Texte du visa
+                <textarea
+                  value={modalSignatureBl.signature}
+                  onChange={(e) => setModalSignatureBl((prev) => ({ ...prev, signature: e.target.value }))}
+                  rows={3}
+                  className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm"
+                  placeholder="Visa manuscrit du réceptionnaire…"
+                />
+              </label>
+            )}
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setModalSignatureBl(null)} className="px-3 py-2 text-xs font-bold rounded border border-slate-300">Plus tard</button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!modalSignatureBl.signataire?.trim()) {
+                    setError('Indiquez le nom du signataire.');
+                    return;
+                  }
+                  if (modalSignatureBl.mode === 'NUMERIQUE' && signatureVide(modalSignatureBl.signature)) {
+                    setError('Signez dans le cadre avant de générer le BL.');
+                    return;
+                  }
+                  if (modalSignatureBl.mode === 'MANUSCRITE' && !(modalSignatureBl.signature || '').trim()) {
+                    setError('Saisissez le texte du visa.');
+                    return;
+                  }
+                  try {
+                    const res = await apiRequest('/flux/bons-livraison', {
+                      method: 'POST',
+                      body: JSON.stringify({
+                        commande_id: modalSignatureBl.commande?.id,
+                        mode_signature: modalSignatureBl.mode,
+                        signataire_nom: modalSignatureBl.signataire,
+                        signature_data: modalSignatureBl.signature || undefined,
+                      }),
+                    });
+                    pushToast(`BL ${res.bon_livraison?.numero} généré et signé.`);
+                    setModalSignatureBl(null);
+                    setDocsRefreshKey((k) => k + 1);
+                    await load();
+                  } catch (err) {
+                    setError(err?.message || 'Impossible de générer le BL.');
+                  }
+                }}
+                className="px-3 py-2 text-xs font-bold rounded bg-[#0E2A4F] text-white"
+              >
+                Générer le BL
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

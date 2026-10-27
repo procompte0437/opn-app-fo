@@ -115,10 +115,15 @@ export default function CustomsClearanceModal({
               <span>Formalités Douanières & Contrôle Pharmaceutique</span>
             </h4>
 
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-[11px] text-emerald-900">
+              <p className="font-bold mb-1">Dossier douanes Achats (présentation)</p>
+              <p>Les Achats préparent la déclaration Sydonia / Cidonia, le BAE, les CoA et les pièces de franchise d’État avant intégration Owendo. L’Appro assure ensuite la distribution nationale.</p>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                  N° Déclaration Sydonia World (Douanes Gabonaises)
+                  N° Déclaration Sydonia / Cidonia (Douanes)
                 </label>
                 <input
                   type="text"

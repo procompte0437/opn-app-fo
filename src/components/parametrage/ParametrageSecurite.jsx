@@ -185,12 +185,31 @@ export default function ParametrageSecurite({ utilisateur }) {
       if (u) setUtilisateurs(u.utilisateurs || []);
       if (p) setProfils(p.profils || []);
       if (h) setHabilitations(h.habilitations || []);
-      if (territoireReponse) {
-        setTerritoire({
-          provinces: territoireReponse.provinces || [],
-          antennes: territoireReponse.antennes || [],
-          directions: territoireReponse.directions || [],
-        });
+      let provinces = territoireReponse?.provinces || [];
+      let antennes = territoireReponse?.antennes || [];
+      let directions = territoireReponse?.directions || [];
+
+      // Repli si /parametrage/territoire échoue ou renvoie des provinces vides.
+      if (!provinces.length || !antennes.length) {
+        const [refProv, refAnt] = await Promise.allSettled([
+          apiRequest('/referentiel/provinces', opts),
+          apiRequest('/antennes', opts),
+        ]);
+        if (!provinces.length && refProv.status === 'fulfilled') {
+          provinces = (refProv.value.lignes || refProv.value.provinces || []).map((p) => ({
+            id: p.id,
+            nom: p.nom || p.libelle,
+            code: p.code,
+          }));
+        }
+        if (!antennes.length && refAnt.status === 'fulfilled') {
+          antennes = refAnt.value.antennes || [];
+        }
+      }
+
+      setTerritoire({ provinces, antennes, directions });
+      if (!provinces.length) {
+        setErreur((prev) => prev || 'Aucune province disponible. Vérifiez le référentiel provinces / antennes.');
       }
 
       const profils = p?.profils || [];
@@ -784,13 +803,18 @@ export default function ParametrageSecurite({ utilisateur }) {
                   />
                 </label>
                 <label className="block text-xs text-slate-600">
-                  Province
+                  Province *
                   <ListeChoix
                     valeur={fiche.province_rattachement_id || ''}
                     surChangement={(provinceId) => setFiche({ ...fiche, province_rattachement_id: provinceId, antenne_id: '' })}
-                    texteVide="Choisir une province"
+                    texteVide={territoire.provinces.length ? 'Choisir une province' : 'Aucune province chargée — actualisez'}
                     options={territoire.provinces.map((province) => ({ value: province.id, label: province.nom }))}
                   />
+                  {!territoire.provinces.length && (
+                    <button type="button" onClick={() => charger()} className="mt-1 text-[11px] font-semibold text-[#2E68B4] underline">
+                      Recharger les provinces
+                    </button>
+                  )}
                 </label>
                 <label className="block text-xs text-slate-600">
                   Antenne

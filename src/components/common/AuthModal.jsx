@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { 
   Lock, 
   ShieldCheck, 
@@ -9,10 +9,11 @@ import {
   AlertCircle, 
   X,
   Loader2,
+  Search,
 } from 'lucide-react';
-import { loginUser, verify2FA, confirmTotpSetup } from '../../services/api';
+import { loginUser, verify2FA, confirmTotpSetup, fetchDemoProfils } from '../../services/api';
 import { ensureSanctumSessionForPersona, getDemoPasswordForEmail, isRealSanctumToken } from '../../services/sanctumSession';
-import { PROFILS_DEFAUT, USERS_PERSONAS, grouperProfilsDefaut } from '../../data/usersPersonas';
+import { PROFILS_DEFAUT, USERS_PERSONAS, enrichirProfilDemo, grouperProfilsDefaut } from '../../data/usersPersonas';
 
 export default function AuthModal({ isOpen, onClose, onAuthSuccess, currentPersona }) {
   const [email, setEmail] = useState(currentPersona?.email || 'jb.obame@opn.ga');
@@ -29,6 +30,10 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, currentPerso
   const [formKey, setFormKey] = useState(0);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
+  const [profilsDemo, setProfilsDemo] = useState(PROFILS_DEFAUT);
+  const [profilsSource, setProfilsSource] = useState('local');
+  const [profilsLoading, setProfilsLoading] = useState(false);
+  const [rechercheProfil, setRechercheProfil] = useState('');
   const connectSeqRef = useRef(0);
   const loginBusyRef = useRef(false);
 
@@ -43,6 +48,26 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, currentPerso
     setErrorMessage('');
     setSuccessMessage('');
     setOtpCode('');
+    setRechercheProfil('');
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    let cancelled = false;
+    setProfilsLoading(true);
+    (async () => {
+      const res = await fetchDemoProfils();
+      if (cancelled) return;
+      if (res.success && res.profils.length > 0) {
+        setProfilsDemo(res.profils.map(enrichirProfilDemo));
+        setProfilsSource('bdd');
+      } else {
+        setProfilsDemo(PROFILS_DEFAUT);
+        setProfilsSource('local');
+      }
+      setProfilsLoading(false);
+    })();
+    return () => { cancelled = true; };
   }, [isOpen]);
 
   const mergePersonaWithApiUser = (persona, apiUser = {}) => {
@@ -67,19 +92,33 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, currentPerso
   };
 
   const finaliserSession = (apiUser, token) => {
-    const matched = USERS_PERSONAS.find((p) => p.email === email) || {
-      id: 'USER-OPN',
-      nom: apiUser?.nom || apiUser?.name || email.split('@')[0],
-      email,
-      role: 'Agent Métier OPN',
-      codeRole: 'AGENT',
-      initiales: 'OPN',
-    };
+    const matched = USERS_PERSONAS.find((p) => p.email === email)
+      || profilsDemo.find((p) => p.email === email)
+      || {
+        id: 'USER-OPN',
+        nom: apiUser?.nom || apiUser?.name || email.split('@')[0],
+        email,
+        role: 'Agent Métier OPN',
+        codeRole: 'AGENT',
+        initiales: 'OPN',
+      };
     onAuthSuccess(mergePersonaWithApiUser(matched, apiUser), token);
     onClose();
   };
 
-  if (!isOpen) return null;
+  const profilsFiltres = useMemo(() => {
+    const q = rechercheProfil.trim().toLowerCase();
+    if (!q) return profilsDemo;
+    return profilsDemo.filter((p) => {
+      const hay = [p.nom, p.name, p.email, p.role, p.profil, p.codeRole, p.province_nom, p.antenne, p.initiales]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [profilsDemo, rechercheProfil]);
+
+  const { nationaux, paires } = useMemo(() => grouperProfilsDefaut(profilsFiltres), [profilsFiltres]);
 
   const handleLoginSubmit = async (e) => {
     e.preventDefault();
@@ -245,15 +284,16 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, currentPerso
     }
   };
 
-  const { nationaux, paires } = grouperProfilsDefaut(PROFILS_DEFAUT);
+  if (!isOpen) return null;
 
   const boutonProfil = (p, compact = false) => {
     if (!p) return null;
-    const isConnecting = connectingPersonaId === p.id;
+    const cle = p.id || p.email || p.user_id;
+    const isConnecting = connectingPersonaId === p.id || connectingPersonaId === cle;
     const accent = p.accentColor || '#2E68B4';
     return (
       <button
-        key={p.id}
+        key={cle}
         type="button"
         disabled={Boolean(connectingPersonaId)}
         onClick={() => handleInstantPersonaLogin(p)}
@@ -294,13 +334,38 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, currentPerso
 
   const personaList = (
     <div className="p-4 rounded-md bg-slate-50 border border-slate-200 flex flex-col min-h-0">
-      <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-        Profils par défaut
-      </span>
-      <p className="text-[11px] text-slate-500 mt-1 mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+          Profils par défaut
+        </span>
+        <span className="text-[10px] font-semibold text-slate-500">
+          {profilsLoading ? 'Chargement…' : `${profilsFiltres.length} / ${profilsDemo.length} · ${profilsSource === 'bdd' ? 'base de données' : 'catalogue local'}`}
+        </span>
+      </div>
+      <p className="text-[11px] text-slate-500 mt-1 mb-2">
         Ouvrez une session de démonstration sans saisir les identifiants.
       </p>
+      <div className="relative mb-3">
+        <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+        <input
+          type="search"
+          value={rechercheProfil}
+          onChange={(e) => setRechercheProfil(e.target.value)}
+          placeholder="Rechercher un profil, un rôle, une antenne…"
+          className="w-full pl-8 pr-3 py-2 text-[11px] border border-slate-300 rounded-md text-slate-900 bg-white focus:outline-none focus:border-[#2E68B4]"
+        />
+      </div>
       <div className="space-y-3 overflow-y-auto max-h-[52vh] pr-1">
+        {profilsLoading && (
+          <p className="text-[11px] text-slate-500 flex items-center gap-2 py-4 justify-center">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Chargement des profils…
+          </p>
+        )}
+        {!profilsLoading && nationaux.length === 0 && paires.length === 0 && (
+          <p className="text-[11px] text-slate-500 text-center py-6">
+            Aucun profil ne correspond à « {rechercheProfil} ».
+          </p>
+        )}
         <div className="space-y-2">
           {nationaux.map((p) => boutonProfil(p))}
         </div>
@@ -308,7 +373,7 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess, currentPerso
         {paires.length > 0 && (
           <div className="space-y-2 pt-1 border-t border-slate-200">
             <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 pt-2">
-              9 antennes — Chef et Demandeur côte à côte
+              Antennes — Chef et Demandeur côte à côte
             </p>
             {paires.map((paire) => (
               <div key={paire.id} className="rounded-md border border-slate-200 bg-white/70 p-2 space-y-1.5">

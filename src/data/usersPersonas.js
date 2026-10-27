@@ -679,19 +679,81 @@ export const PROVINCES_OPN = [
   { id: 'G9', nom: 'Woleu-Ntem' },
 ];
 
+function normaliserProvinceCle(profil) {
+  const code = String(profil?.provinceId || '').toUpperCase();
+  if (/^G[1-9]$/.test(code)) return code;
+  const nom = String(profil?.province_nom || profil?.antenne || '').trim().toLowerCase();
+  if (!nom) return null;
+  const match = PROVINCES_OPN.find((p) => {
+    const libelle = p.nom.toLowerCase();
+    return nom.includes(libelle) || libelle.includes(nom);
+  });
+  if (match) return match.id;
+  return `NOM:${nom}`;
+}
+
 /**
  * Sépare les profils nationaux des paires provinciales (chef + demandeur côte à côte).
+ * Accepte les personas hardcodés OU les profils issus de la BDD.
  */
 export function grouperProfilsDefaut(profils = PROFILS_DEFAUT) {
-  const estChefProvince = (p) => p.codeRole === 'CHEF_ANTENNE_PROVINCIALE' && /^OPN-ANT-G\d$/.test(p.id);
-  const estDemandeurProvince = (p) => p.codeRole === 'DEMANDEUR_PHARMACIEN' && /^OPN-DEM-G\d$/.test(p.id);
+  const estChefProvince = (p) =>
+    p.codeRole === 'CHEF_ANTENNE_PROVINCIALE'
+    || (p.code_role === 'CHEF_ANTENNE_PROVINCIALE');
+  const estDemandeurProvince = (p) =>
+    p.codeRole === 'DEMANDEUR_PHARMACIEN'
+    || p.code_role === 'DEMANDEUR_PHARMACIEN';
 
   const nationaux = profils.filter((p) => !estChefProvince(p) && !estDemandeurProvince(p));
-  const paires = PROVINCES_OPN.map((province) => ({
-    ...province,
-    chef: profils.find((p) => estChefProvince(p) && p.provinceId === province.id) || null,
-    demandeur: profils.find((p) => estDemandeurProvince(p) && p.provinceId === province.id) || null,
-  })).filter((paire) => paire.chef || paire.demandeur);
+
+  const chefs = profils.filter(estChefProvince);
+  const demandeurs = profils.filter(estDemandeurProvince);
+  const cles = new Set([
+    ...chefs.map(normaliserProvinceCle).filter(Boolean),
+    ...demandeurs.map(normaliserProvinceCle).filter(Boolean),
+  ]);
+
+  const paires = [...cles].map((cle) => {
+    const meta = PROVINCES_OPN.find((p) => p.id === cle);
+    const chef = chefs.find((p) => normaliserProvinceCle(p) === cle) || null;
+    const demandeur = demandeurs.find((p) => normaliserProvinceCle(p) === cle) || null;
+    return {
+      id: cle,
+      nom: meta?.nom || chef?.province_nom || chef?.antenne || demandeur?.province_nom || demandeur?.antenne || cle,
+      chef,
+      demandeur,
+    };
+  }).filter((paire) => paire.chef || paire.demandeur)
+    .sort((a, b) => {
+      const ia = PROVINCES_OPN.findIndex((p) => p.id === a.id);
+      const ib = PROVINCES_OPN.findIndex((p) => p.id === b.id);
+      if (ia >= 0 && ib >= 0) return ia - ib;
+      if (ia >= 0) return -1;
+      if (ib >= 0) return 1;
+      return String(a.nom).localeCompare(String(b.nom), 'fr');
+    });
 
   return { nationaux, paires };
+}
+
+/** Enrichit un profil BDD avec couleurs / initiales du catalogue local si email connu. */
+export function enrichirProfilDemo(profilDb) {
+  const local = USERS_PERSONAS.find((p) => p.email?.toLowerCase() === String(profilDb?.email || '').toLowerCase());
+  if (!local) {
+    return {
+      ...profilDb,
+      badgeColor: profilDb.badgeColor || 'bg-[#2E68B4]',
+      accentColor: profilDb.accentColor || '#2E68B4',
+      initiales: profilDb.initiales || 'OPN',
+    };
+  }
+  return {
+    ...profilDb,
+    id: profilDb.id || local.id,
+    initiales: local.initiales || profilDb.initiales,
+    badgeColor: local.badgeColor,
+    accentColor: local.accentColor,
+    avatar: local.avatar,
+    provinceId: profilDb.provinceId || local.provinceId,
+  };
 }

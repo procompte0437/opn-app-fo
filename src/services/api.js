@@ -338,6 +338,35 @@ export async function demoQuickLogin(email) {
   });
 }
 
+/** Profils de connexion rapide — source BDD (public, sans token). */
+export async function fetchDemoProfils() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(`${API_BASE_URL}/auth/demo-profils`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { success: false, profils: [], message: data.message || `Erreur (${response.status})` };
+    }
+    return {
+      success: true,
+      profils: Array.isArray(data?.profils) ? data.profils : [],
+      count: data?.count ?? 0,
+    };
+  } catch (error) {
+    if (isTransportError(error) || error?.name === 'AbortError') {
+      return { success: false, backendUnavailable: true, profils: [], message: '' };
+    }
+    return { success: false, profils: [], message: error?.message || 'Impossible de charger les profils.' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Validation Code 2FA (OTP e-mail ou Google Authenticator)
  */

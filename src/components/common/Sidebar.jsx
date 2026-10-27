@@ -107,9 +107,13 @@ export default function Sidebar({
     if (navRef.current) navRef.current.scrollTop = 0;
   }, [user?.email, user?.id, codeRole]);
 
+  const btnChrome = 'p-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-[#0E2A4F] shadow-sm';
+
   return (
-    <aside className={`${collapsed ? 'w-[4.75rem]' : 'w-64'} bg-[#0E2A4F] border-r border-[#0A1F3C] flex flex-col shrink-0 h-full min-h-0 overflow-hidden shadow-sm transition-[width] duration-200`}>
-      <div className={`h-16 shrink-0 border-b border-white/10 flex items-center ${collapsed ? 'justify-center px-1' : 'justify-between gap-2 px-3'}`}>
+    <aside
+      className={`${collapsed ? 'w-[4.75rem]' : 'w-64'} bg-[#F4F7FB] border-r border-slate-200/80 flex flex-col shrink-0 h-full min-h-0 overflow-hidden transition-[width] duration-200`}
+    >
+      <div className={`h-16 shrink-0 border-b border-slate-200/80 flex items-center ${collapsed ? 'justify-center px-1' : 'justify-between gap-2 px-3'}`}>
         <button
           type="button"
           onClick={() => setCurrentView(menuItems[0]?.id || 'flux_appro')}
@@ -119,7 +123,7 @@ export default function Sidebar({
           {collapsed ? (
             <OpnLogo variant="symbol" className="h-9 w-9" />
           ) : (
-            <OpnLogo theme="white" className="h-11 max-w-[11.5rem]" />
+            <OpnLogo theme="default" className="h-11 max-w-[11.5rem]" />
           )}
         </button>
         {!collapsed && (
@@ -127,7 +131,7 @@ export default function Sidebar({
             <button
               type="button"
               onClick={onCollapse}
-              className="p-1 rounded border border-white/15 bg-white/10 hover:bg-white/20 text-white"
+              className={btnChrome}
               title="Réduire la barre latérale"
             >
               <ChevronsLeft className="w-3.5 h-3.5" />
@@ -135,7 +139,7 @@ export default function Sidebar({
             <button
               type="button"
               onClick={onHide}
-              className="p-1 rounded border border-white/15 bg-white/10 hover:bg-white/20 text-white"
+              className={btnChrome}
               title="Cacher la barre latérale"
             >
               <PanelLeftClose className="w-3.5 h-3.5" />
@@ -145,11 +149,11 @@ export default function Sidebar({
       </div>
 
       {collapsed && (
-        <div className="shrink-0 flex items-center justify-center gap-1 py-1.5 border-b border-white/10">
+        <div className="shrink-0 flex items-center justify-center gap-1 py-1.5 border-b border-slate-200/80">
           <button
             type="button"
             onClick={onExpand}
-            className="p-1 rounded border border-white/15 bg-white/10 hover:bg-white/20 text-white"
+            className={btnChrome}
             title="Agrandir la barre latérale"
           >
             <ChevronsRight className="w-3.5 h-3.5" />
@@ -157,7 +161,7 @@ export default function Sidebar({
           <button
             type="button"
             onClick={onHide}
-            className="p-1 rounded border border-white/15 bg-white/10 hover:bg-white/20 text-white"
+            className={btnChrome}
             title="Cacher la barre latérale"
           >
             <PanelLeftClose className="w-3.5 h-3.5" />
@@ -165,56 +169,56 @@ export default function Sidebar({
         </div>
       )}
 
-      <nav ref={navRef} className={`flex-1 min-h-0 overflow-y-auto space-y-1 ${collapsed ? 'p-2' : 'p-3'}`}>
-          {!collapsed && (
-          <div className="px-3 py-1.5 text-[10px] font-bold text-blue-200/70 uppercase tracking-wider flex items-center justify-between gap-2">
-            <span>Modules Autorisés</span>
-            <span className="text-[9px] font-mono bg-white/10 text-blue-100 px-1 py-0.5 rounded shrink-0">
+      <nav ref={navRef} className={`flex-1 min-h-0 overflow-y-auto space-y-0.5 ${collapsed ? 'p-2' : 'p-3'}`}>
+        {!collapsed && (
+          <div className="px-2.5 py-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between gap-2">
+            <span>Modules autorisés</span>
+            <span className="text-[9px] font-mono bg-white text-[#2E68B4] border border-slate-200 px-1.5 py-0.5 rounded-md shrink-0">
               {user.scope || 'PROVINCE'} · {menuItems.length}
             </span>
           </div>
-          )}
-          {menuItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = currentView === item.id;
-            return (
-              <button
-                key={`${item.id}-${item.label}`}
-                onClick={() => setCurrentView(item.id)}
-                title={item.label}
-                className={`w-full flex items-center ${collapsed ? 'justify-center px-2' : 'px-3'} py-2 rounded-md text-xs font-semibold transition-all ${
-                  isActive
-                    ? 'bg-[#2E68B4] text-white shadow-sm font-bold'
-                    : 'text-blue-100 hover:bg-white/10 hover:text-white'
-                }`}
-              >
-                <div className={`flex items-center min-w-0 ${collapsed ? '' : 'gap-2.5'}`}>
-                  <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : 'text-blue-200'}`} />
-                  {!collapsed && <span className="min-w-0 text-left truncate">{item.label}</span>}
-                </div>
-              </button>
-            );
-          })}
-        </nav>
-      {!collapsed && (
-      <div className="shrink-0 border-t border-white/10 bg-transparent space-y-2 p-3">
-        <div className="bg-white/10 rounded-md p-2.5 border border-white/10 text-xs">
-          <div className="flex items-center justify-between text-blue-100/70 mb-1">
-            <span className="flex items-center gap-1.5 font-semibold text-[11px] text-white">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              Réseau National
-            </span>
-            <span className="font-bold text-emerald-300 text-[11px]">9/9 Antennes</span>
-          </div>
-          <p className="text-[10px] text-blue-100/70">
-            {user.provinceId === 'G1' || user.scope === 'GLOBAL' || user.scope === 'NATIONAL' 
-              ? (codeRole === 'SUPER_ADMIN' ? 'Supervision SI — hors exécution Appro' : 'Vision Nationale Centrale OPN')
-              : `Périmètre : Zone Provinciale ${user.provinceId}`}
-          </p>
-        </div>
-      </div>
-      )}
+        )}
+        {menuItems.map((item) => {
+          const Icon = item.icon;
+          const isActive = currentView === item.id;
+          return (
+            <button
+              key={`${item.id}-${item.label}`}
+              onClick={() => setCurrentView(item.id)}
+              title={item.label}
+              className={`w-full flex items-center ${collapsed ? 'justify-center px-2' : 'px-3'} py-2.5 rounded-xl text-xs transition-all ${
+                isActive
+                  ? 'bg-[#E8F1FA] text-[#0E2A4F] border border-[#0E2A4F]/25 font-bold shadow-sm'
+                  : 'text-slate-600 border border-transparent hover:bg-white hover:text-[#0E2A4F] font-semibold'
+              }`}
+            >
+              <div className={`flex items-center min-w-0 ${collapsed ? '' : 'gap-2.5'}`}>
+                <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-[#2E68B4]' : 'text-[#2E68B4]/80'}`} strokeWidth={isActive ? 2.25 : 1.75} />
+                {!collapsed && <span className="min-w-0 text-left truncate">{item.label}</span>}
+              </div>
+            </button>
+          );
+        })}
+      </nav>
 
+      {!collapsed && (
+        <div className="shrink-0 border-t border-slate-200/80 p-3">
+          <div className="bg-white rounded-xl p-2.5 border border-slate-200 text-xs shadow-sm">
+            <div className="flex items-center justify-between text-slate-500 mb-1">
+              <span className="flex items-center gap-1.5 font-semibold text-[11px] text-[#0E2A4F]">
+                <span className="w-2 h-2 rounded-full bg-[#00A651] animate-pulse" />
+                Réseau National
+              </span>
+              <span className="font-bold text-[#00A651] text-[11px]">9/9 Antennes</span>
+            </div>
+            <p className="text-[10px] text-slate-500 leading-snug">
+              {user.provinceId === 'G1' || user.scope === 'GLOBAL' || user.scope === 'NATIONAL' 
+                ? (codeRole === 'SUPER_ADMIN' ? 'Supervision SI — hors exécution Appro' : 'Vision Nationale Centrale OPN')
+                : `Périmètre : Zone Provinciale ${user.provinceId}`}
+            </p>
+          </div>
+        </div>
+      )}
     </aside>
   );
 }
