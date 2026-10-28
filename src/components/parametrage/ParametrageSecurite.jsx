@@ -23,15 +23,6 @@ const DRAPEAUX_GESTION = [
   ['supprimer', 'Supprimer'],
 ];
 
-function codeDepuisLibelle(libelle) {
-  return String(libelle || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_|_$/g, '');
-}
-
 function estAcces(code) {
   return String(code || '').startsWith('ACCESS_');
 }
@@ -884,9 +875,29 @@ export default function ParametrageSecurite({ utilisateur }) {
             )}
             {fiche.type === 'profil' && (
               <>
-                <input required value={fiche.libelle} onChange={(event) => setFiche({ ...fiche, libelle: event.target.value })} placeholder="Libellé" className="w-full border rounded px-2 py-1.5 text-sm" />
-                {!fiche.id && <p className="text-xs text-slate-500">Code : {codeDepuisLibelle(fiche.libelle) || '—'}</p>}
-                <input type="number" min="0" max="9" value={fiche.niveau_validation} onChange={(event) => setFiche({ ...fiche, niveau_validation: event.target.value })} className="w-full border rounded px-2 py-1.5 text-sm" />
+                <label className="block text-xs text-slate-600">
+                  Libellé du profil *
+                  <input
+                    required
+                    value={fiche.libelle}
+                    onChange={(event) => setFiche({ ...fiche, libelle: event.target.value })}
+                    placeholder="Ex. Demandeur — Pharmacie"
+                    className="mt-1 w-full border rounded px-2 py-1.5 text-sm text-slate-900"
+                  />
+                </label>
+                <label className="block text-xs text-slate-600">
+                  Niveau de validation
+                  <select
+                    value={Number(fiche.niveau_validation ?? 0)}
+                    onChange={(event) => setFiche({ ...fiche, niveau_validation: Number(event.target.value) })}
+                    className="mt-1 w-full border rounded px-2 py-1.5 text-sm text-slate-900 bg-white"
+                  >
+                    {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((niveau) => (
+                      <option key={niveau} value={niveau}>{niveau}</option>
+                    ))}
+                  </select>
+                  <span className="mt-1 block text-[11px] text-slate-400">De 0 (aucun) à 9 (maximum). Le code technique du profil est généré automatiquement.</span>
+                </label>
                 {!fiche.id && (fiche.habilitations || []).map((row, index) => (
                   <div key={row.id} className="flex flex-wrap items-center gap-2 text-xs border-b border-slate-100 py-1">
                     <span className="w-40 font-mono">{row.code}</span>

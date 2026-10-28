@@ -258,23 +258,26 @@ const STATUTS_PRISE_SIEGE = ['TRANSFEREE_SIEGE', 'TRANSMISE_SIEGE', 'PARTIELLEME
 
 function reliquatLigne(row) {
   const demandee = Number(row.quantite_demandee || 0);
+  const priseAntenne = Number(row.quantite_prise_antenne || 0);
   const prise = Number(row.quantite_prise_en_charge || 0);
-  return Math.max(0, Number(row.quantite_reliquat ?? demandee - prise));
+  return Math.max(0, Number(row.quantite_reliquat ?? (demandee - priseAntenne - prise)));
 }
 
 function resteDispersionLigne(row) {
   return Math.max(0, Number(row.quantite_prise_en_charge || 0) - Number(row.quantite_dispersee || 0));
 }
 
-/** Totaux demandé / pris en charge / archivé d'une commande. */
+/** Totaux demandé / pris antenne / pris siège / reliquat d'une commande. */
 function suiviQuantites(commande) {
   return (commande.lignes || []).reduce((totaux, row) => {
     totaux.demande += Number(row.quantite_demandee || 0);
+    totaux.pris_antenne += Number(row.quantite_prise_antenne || 0);
     totaux.pris += Number(row.quantite_prise_en_charge || 0);
     totaux.archive += reliquatLigne(row);
+    totaux.reliquat += reliquatLigne(row);
     totaux.dispersee += Number(row.quantite_dispersee || 0);
     return totaux;
-  }, { demande: 0, pris: 0, archive: 0, dispersee: 0 });
+  }, { demande: 0, pris_antenne: 0, pris: 0, archive: 0, reliquat: 0, dispersee: 0 });
 }
 
 /** Tailles de page pour la liste en cartes (tous profils). */
@@ -589,11 +592,15 @@ export default function FluxApprovisionnement({ activePersona }) {
   const [kits, setKits] = useState(KITS_DEFAUT);
   const [parDemandeurs, setParDemandeurs] = useState([]);
   const [alertesRupture, setAlertesRupture] = useState([]);
+  const [lotsStock, setLotsStock] = useState([]);
   const [dateLivraisonPrevue, setDateLivraisonPrevue] = useState('');
+  const [dateLivraisonReliquatAction, setDateLivraisonReliquatAction] = useState('');
   const [selectionBc, setSelectionBc] = useState(() => new Set());
   const [bcGlobaux, setBcGlobaux] = useState([]);
-  const [vueChef, setVueChef] = useState('demandeurs'); // demandeurs | chronologie | bc
+  const [vueChef, setVueChef] = useState('demandeurs'); // demandeurs | chronologie | bc | stock
   const [modalSignatureBl, setModalSignatureBl] = useState(null);
+  const [entreeStock, setEntreeStock] = useState({ produit_id: '', quantite: '', numero_lot: '', date_peremption: '' });
+  const [savingStock, setSavingStock] = useState(false);
 
   const codeRoleCompte = role || activePersona?.codeRole || activePersona?.code_role;
   const estChefAntenne = ['CHEF_ANTENNE_PROVINCIALE', 'PHARMACIEN_CHEF_ANTENNE'].includes(codeRoleCompte);
@@ -682,6 +689,7 @@ export default function FluxApprovisionnement({ activePersona }) {
         }
         if (stock.status === 'fulfilled') {
           setAlertesRupture(stock.value.alertes_rupture || []);
+          setLotsStock(stock.value.lots || []);
           if (stock.value.date_livraison_prevue) {
             setDateLivraisonPrevue(String(stock.value.date_livraison_prevue).slice(0, 10));
           }
@@ -943,10 +951,21 @@ export default function FluxApprovisionnement({ activePersona }) {
     });
   }
 
-  /** Transfert simple antenne → siège (pas de choix de quantités). */
+  /** Transfert simple antenne → siège (reste après stock local). */
   async function transfererAuSiege(commande) {
+    const reste = (commande.lignes || []).reduce(
+      (n, row) => n + Math.max(0, Number(row.quantite_demandee || 0) - Number(row.quantite_prise_antenne || 0)),
+      0
+    );
+    const dateReliquat = dateLivraisonPrevue || commande.date_livraison_reliquat || commande.date_livraison_prevue || '';
+    if (reste > 0 && !dateReliquat) {
+      setError('Indiquez d’abord la date de livraison prévue du reliquat (champ « Prochaine livraison »).');
+      return;
+    }
     const ok = await askConfirm({
-      message: `Transférer ${commande.numero_commande} au siège OPN ?`,
+      message: reste > 0
+        ? `Transférer ${commande.numero_commande} au siège (${reste} unité(s) restantes) — livraison prévue ${dateReliquat} ?`
+        : `Transférer ${commande.numero_commande} au siège OPN ?`,
       confirmLabel: 'Transférer',
     });
     if (!ok) return;
@@ -955,7 +974,10 @@ export default function FluxApprovisionnement({ activePersona }) {
     try {
       await apiRequest(`/flux/commandes/${commande.id}/transferer`, {
         method: 'POST',
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          date_livraison_prevue: dateReliquat || undefined,
+          date_livraison_reliquat: dateReliquat || undefined,
+        }),
       });
       pushToast(`${commande.numero_commande} transférée au siège.`);
       await load();
@@ -983,6 +1005,9 @@ export default function FluxApprovisionnement({ activePersona }) {
     });
     setQuantitesAction(initial);
     setNoteAction('');
+    setDateLivraisonReliquatAction(
+      String(commande.date_livraison_reliquat || commande.date_livraison_prevue || dateLivraisonPrevue || '').slice(0, 10)
+    );
     setError('');
     setModalAction({ type, commande });
   }
@@ -1025,13 +1050,34 @@ export default function FluxApprovisionnement({ activePersona }) {
       return;
     }
 
+    const resteApres = (commande.lignes || []).reduce((n, row) => {
+      const max = maxActionLigne(type, row);
+      const prisMaintenant = Number(quantitesAction[row.id] || 0);
+      if (type === 'prise_antenne') {
+        return n + Math.max(0, max - prisMaintenant);
+      }
+      if (type === 'prise') {
+        return n + Math.max(0, max - prisMaintenant);
+      }
+      return n;
+    }, 0);
+    if ((type === 'prise_antenne' || type === 'prise') && resteApres > 0 && !dateLivraisonReliquatAction) {
+      setError('Indiquez la date de livraison prévue du reliquat.');
+      return;
+    }
+
     setSavingAction(true);
     setError('');
     try {
       if (type === 'prise') {
         const res = await apiRequest(`/flux/commandes/${commande.id}/transmettre`, {
           method: 'POST',
-          body: JSON.stringify({ lignes, note: noteAction || undefined }),
+          body: JSON.stringify({
+            lignes,
+            note: noteAction || undefined,
+            date_livraison_reliquat: dateLivraisonReliquatAction || undefined,
+            date_livraison_prevue: dateLivraisonReliquatAction || undefined,
+          }),
         });
         const bc = res?.bon_commande?.numero;
         const fac = res?.facture?.numero;
@@ -1044,7 +1090,12 @@ export default function FluxApprovisionnement({ activePersona }) {
       } else if (type === 'prise_antenne') {
         await apiRequest(`/flux/commandes/${commande.id}/prise-antenne`, {
           method: 'POST',
-          body: JSON.stringify({ lignes, note: noteAction || undefined }),
+          body: JSON.stringify({
+            lignes,
+            note: noteAction || undefined,
+            date_livraison_reliquat: dateLivraisonReliquatAction || undefined,
+            date_livraison_prevue: dateLivraisonReliquatAction || undefined,
+          }),
         });
         pushToast(`Prise en charge stock antenne pour ${commande.numero_commande}.`);
       } else {
@@ -1241,7 +1292,15 @@ export default function FluxApprovisionnement({ activePersona }) {
           <p className="text-[10px] text-slate-600">
             Dem. <span className="font-semibold">{suivi.demandee ?? suivi.demande}</span>
             {' · '}Pris <span className="font-semibold text-emerald-800">{suivi.prise ?? suivi.pris}</span>
+            {(suivi.pris_antenne > 0 || Number(commande.quantites?.prise_antenne || 0) > 0) && (
+              <>
+                {' · '}Ant. <span className="font-semibold text-teal-800">{suivi.pris_antenne || commande.quantites?.prise_antenne || 0}</span>
+              </>
+            )}
             {' · '}Rel. <span className="font-semibold text-violet-800">{suivi.reliquat ?? suivi.archive}</span>
+            {(commande.date_livraison_reliquat || commande.date_livraison_prevue) && (suivi.reliquat ?? suivi.archive) > 0 && (
+              <span className="text-[10px] text-amber-700"> · livr. reliquat {String(commande.date_livraison_reliquat || commande.date_livraison_prevue).slice(0, 10)}</span>
+            )}
             {' · '}Disp. <span className="font-semibold text-emerald-900">{suivi.dispersee ?? 0}</span>
           </p>
           {commandeDispersee(commande) && piecesCommande(commande).length > 0 && (
@@ -1413,6 +1472,7 @@ export default function FluxApprovisionnement({ activePersona }) {
               { id: 'demandeurs', label: 'Par demandeur' },
               { id: 'chronologie', label: 'Chronologie' },
               { id: 'bc', label: `BC globaux (${bcGlobaux.length})` },
+              { id: 'stock', label: `Stock (${lotsStock.length})` },
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -1495,7 +1555,7 @@ export default function FluxApprovisionnement({ activePersona }) {
                   </p>
                 )}
 
-                {!loading && commandesVisibles.length === 0 && (
+                {!loading && commandesVisibles.length === 0 && !(estChefAntenne && (vueChef === 'stock' || vueChef === 'bc')) && (
                   <p className="text-xs text-slate-500 text-center py-8">
                     {commandes.length === 0
                       ? (estDemandeur ? 'Aucune demande enregistrée. Utilisez Nouvelle demande pour commander auprès de votre antenne.' : 'Aucune commande pour ce profil.')
@@ -1574,6 +1634,119 @@ export default function FluxApprovisionnement({ activePersona }) {
                     {!bcGlobaux.length && (
                       <p className="text-xs text-slate-500 text-center py-6">Aucun BC global. Cochez des demandes puis « BC global ».</p>
                     )}
+                  </div>
+                )}
+
+                {!loading && estChefAntenne && vueChef === 'stock' && (
+                  <div className="p-3 space-y-3">
+                    <p className="text-[11px] text-slate-500 px-1">
+                      Gestion du stock antenne (lots FEFO). En cas de reliquat sur une demande, renseignez la date de livraison prévue.
+                    </p>
+                    <form
+                      className="border border-slate-200 rounded-md bg-white p-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 items-end"
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        if (!entreeStock.produit_id || !Number(entreeStock.quantite)) {
+                          setError('Choisissez un produit et une quantité.');
+                          return;
+                        }
+                        setSavingStock(true);
+                        setError('');
+                        try {
+                          await apiRequest('/flux/stock-antenne/entree', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                              produit_id: Number(entreeStock.produit_id),
+                              quantite: Number(entreeStock.quantite),
+                              numero_lot: entreeStock.numero_lot || undefined,
+                              date_peremption: entreeStock.date_peremption || undefined,
+                            }),
+                          });
+                          pushToast('Entrée de stock enregistrée.');
+                          setEntreeStock({ produit_id: '', quantite: '', numero_lot: '', date_peremption: '' });
+                          await load();
+                        } catch (err) {
+                          setError(err?.message || 'Entrée stock impossible.');
+                        } finally {
+                          setSavingStock(false);
+                        }
+                      }}
+                    >
+                      <label className="text-[11px] text-slate-600 lg:col-span-2">
+                        Produit
+                        <select
+                          value={entreeStock.produit_id}
+                          onChange={(e) => setEntreeStock((p) => ({ ...p, produit_id: e.target.value }))}
+                          className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-xs"
+                        >
+                          <option value="">Choisir…</option>
+                          {(produits || []).slice(0, 200).map((p) => (
+                            <option key={p.id} value={p.id}>{p.designation || p.nom}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="text-[11px] text-slate-600">
+                        Quantité
+                        <input type="number" min="1" value={entreeStock.quantite} onChange={(e) => setEntreeStock((p) => ({ ...p, quantite: e.target.value }))} className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-xs" />
+                      </label>
+                      <label className="text-[11px] text-slate-600">
+                        N° lot
+                        <input value={entreeStock.numero_lot} onChange={(e) => setEntreeStock((p) => ({ ...p, numero_lot: e.target.value }))} className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-xs" placeholder="Optionnel" />
+                      </label>
+                      <button type="submit" disabled={savingStock} className="px-3 py-2 text-xs font-bold rounded bg-teal-700 text-white disabled:opacity-60">
+                        {savingStock ? 'Enregistrement…' : '+ Entrée stock'}
+                      </button>
+                    </form>
+                    <div className="overflow-x-auto border border-slate-200 rounded-md bg-white">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                          <tr>
+                            <th className="px-2 py-1.5">Produit</th>
+                            <th className="px-2 py-1.5">Lot</th>
+                            <th className="px-2 py-1.5">Péremption</th>
+                            <th className="px-2 py-1.5">Dispo</th>
+                            <th className="px-2 py-1.5">Ajuster</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {lotsStock.map((lot) => (
+                            <tr key={lot.id} className={`border-t border-slate-100 ${lot.rupture ? 'bg-rose-50' : lot.critique ? 'bg-amber-50' : ''}`}>
+                              <td className="px-2 py-1.5 font-semibold text-slate-800">{lot.designation}</td>
+                              <td className="px-2 py-1.5 font-mono text-[10px]">{lot.numero_lot}</td>
+                              <td className="px-2 py-1.5">{lot.date_peremption ? String(lot.date_peremption).slice(0, 10) : '—'}</td>
+                              <td className="px-2 py-1.5 font-bold">{lot.quantite_disponible}</td>
+                              <td className="px-2 py-1.5">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  defaultValue={lot.quantite_disponible}
+                                  className="w-20 border border-slate-200 rounded px-1.5 py-0.5 text-xs"
+                                  onBlur={async (e) => {
+                                    const qte = Number(e.target.value);
+                                    if (Number.isNaN(qte) || qte === Number(lot.quantite_disponible)) return;
+                                    try {
+                                      await apiRequest(`/flux/stock-antenne/${lot.id}`, {
+                                        method: 'PUT',
+                                        body: JSON.stringify({ quantite_disponible: qte, motif: 'Ajustement inventaire' }),
+                                      });
+                                      pushToast(`Lot ${lot.numero_lot} ajusté à ${qte}.`);
+                                      await load();
+                                    } catch (err) {
+                                      setError(err?.message || 'Ajustement impossible.');
+                                    }
+                                  }}
+                                />
+                              </td>
+                            </tr>
+                          ))}
+                          {!lotsStock.length && (
+                            <tr>
+                              <td colSpan={5} className="px-2 py-6 text-center text-slate-500">Aucun lot en stock. Ajoutez une entrée ci-dessus.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 )}
 
@@ -1956,7 +2129,8 @@ export default function FluxApprovisionnement({ activePersona }) {
                       <p className="text-xs font-semibold text-slate-800">{row.designation}</p>
                       <p className="text-[10px] text-slate-500">
                         Demandé {row.quantite_demandee}
-                        {' · '}pris {row.quantite_prise_en_charge || 0}
+                        {' · '}antenne {row.quantite_prise_antenne || 0}
+                        {' · '}siège {row.quantite_prise_en_charge || 0}
                         {' · '}reliquat {reliquatLigne(row)}
                         {' · '}dispersé {row.quantite_dispersee || 0}
                         {disabled ? ' — rien à traiter' : ` — max cette vague : ${max}`}
@@ -1978,6 +2152,21 @@ export default function FluxApprovisionnement({ activePersona }) {
                 );
               })}
             </ul>
+            {(modalAction.type === 'prise_antenne' || modalAction.type === 'prise') && (
+              <label className="block text-xs text-slate-600">
+                Date de livraison du reliquat
+                <input
+                  type="date"
+                  value={dateLivraisonReliquatAction}
+                  onChange={(e) => setDateLivraisonReliquatAction(e.target.value)}
+                  disabled={savingAction}
+                  className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm"
+                />
+                <span className="mt-1 block text-[10px] text-slate-400">
+                  Obligatoire si le stock ne couvre pas toute la demande (reliquat).
+                </span>
+              </label>
+            )}
             <label className="block text-xs text-slate-600">
               Note (optionnel)
               <input
