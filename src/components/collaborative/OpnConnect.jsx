@@ -15,6 +15,7 @@ import {
   CheckCheck,
   Calendar,
   Phone,
+  Circle,
 } from 'lucide-react';
 import { getAuthToken } from '../../services/api';
 import {
@@ -35,6 +36,7 @@ import {
   parseVisioInvite,
   reactToMessage,
 } from '../../services/connectApi';
+import { sendPresenceHeartbeat } from '../../services/presenceApi';
 import { getEcho, disconnectEcho, isRealtimeAvailable } from '../../services/echo';
 import { OFFICIAL_DOCUMENTS_GED, VIRTUAL_MEETINGS } from '../../data/collaborativeData';
 import { resolveEmojiDisplay } from '../../data/connectEmojis';
@@ -215,6 +217,7 @@ export default function OpnConnect({
   const [creating, setCreating] = useState(false);
   const [loadingDirectory, setLoadingDirectory] = useState(false);
   const [directoryQuery, setDirectoryQuery] = useState('');
+  const [onlineOnly, setOnlineOnly] = useState(false);
 
   // Visio native OPN (WebRTC)
   const [jitsiSession, setJitsiSession] = useState(null);
@@ -368,14 +371,29 @@ export default function OpnConnect({
     [conversations, selectedId]
   );
 
+  const onlineDirectoryCount = useMemo(
+    () => directory.filter((u) => Boolean(u?.online)).length,
+    [directory]
+  );
+
   const filteredDirectory = useMemo(() => {
     const q = directoryQuery.trim().toLowerCase();
-    if (!q) return directory;
-    return directory.filter((u) => {
-      const hay = `${u.name || ''} ${u.nom || ''} ${u.email || ''} ${u.entite || ''} ${u.code_role || ''}`.toLowerCase();
-      return hay.includes(q);
+    let list = directory;
+    if (onlineOnly) {
+      list = list.filter((u) => Boolean(u?.online));
+    }
+    if (q) {
+      list = list.filter((u) => {
+        const hay = `${u.name || ''} ${u.nom || ''} ${u.email || ''} ${u.entite || ''} ${u.code_role || ''}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    return [...list].sort((a, b) => {
+      const onlineDelta = Number(Boolean(b?.online)) - Number(Boolean(a?.online));
+      if (onlineDelta !== 0) return onlineDelta;
+      return String(directoryLabel(a)).localeCompare(String(directoryLabel(b)), 'fr');
     });
-  }, [directory, directoryQuery]);
+  }, [directory, directoryQuery, onlineOnly]);
 
   selectedIdRef.current = selectedId;
 
@@ -640,9 +658,16 @@ export default function OpnConnect({
     setShowNewModal(true);
     setSelectedMemberIds([]);
     setDirectoryQuery('');
+    setOnlineOnly(false);
     setNewTitle(mode === 'visio' ? 'Appel vidéo équipe OPN' : '');
     setLoadingDirectory(true);
     try {
+      // Heartbeat pour apparaître soi-même en ligne, puis annuaire enrichi
+      try {
+        await sendPresenceHeartbeat();
+      } catch {
+        /* présence optionnelle */
+      }
       const users = await fetchDirectory();
       setDirectory(Array.isArray(users) ? users : []);
     } catch (err) {
@@ -654,13 +679,11 @@ export default function OpnConnect({
   }
 
   function joinScheduledMeeting(meeting) {
-    const room = meetingJitsiRoom(meeting);
-    setJitsiSession({
-      room,
-      conversationId: null,
-      title: meeting.titre,
-      isCaller: true,
-    });
+    // WebRTC exige une conversation membre pour la signalisation offer/answer.
+    // On ouvre le flux « Nouvelle visio » prérempli plutôt qu'une salle orpheline.
+    setActiveTab('chat');
+    openNewDiscussion('visio');
+    setNewTitle(meeting?.titre || 'Réunion visio OPN');
   }
 
   function toggleMember(userId) {
@@ -1702,16 +1725,36 @@ export default function OpnConnect({
               </div>
 
               <div>
-                <label className="block text-[11px] font-bold text-slate-600 uppercase mb-1.5">
-                  Participants (annuaire)
-                </label>
-                <input
-                  type="search"
-                  value={directoryQuery}
-                  onChange={(e) => setDirectoryQuery(e.target.value)}
-                  placeholder="Rechercher : Chantal, daf@opn.ga, DAF…"
-                  className="mb-2 w-full rounded-md border border-slate-200 px-3 py-2 text-xs focus:outline-none focus:border-[#2E68B4]"
-                />
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <label className="block text-[11px] font-bold text-slate-600 uppercase">
+                    Participants (annuaire)
+                  </label>
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-full px-2 py-0.5">
+                    <Circle className="w-2 h-2 fill-emerald-500 text-emerald-500" />
+                    {onlineDirectoryCount} en ligne
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 mb-2">
+                  <input
+                    type="search"
+                    value={directoryQuery}
+                    onChange={(e) => setDirectoryQuery(e.target.value)}
+                    placeholder="Rechercher : Chantal, daf@opn.ga, DAF…"
+                    className="flex-1 rounded-md border border-slate-200 px-3 py-2 text-xs focus:outline-none focus:border-[#2E68B4]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setOnlineOnly((v) => !v)}
+                    className={`shrink-0 rounded-md border px-2.5 py-2 text-[10px] font-bold transition-colors ${
+                      onlineOnly
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                    }`}
+                    title="Afficher uniquement les profils en ligne"
+                  >
+                    En ligne
+                  </button>
+                </div>
                 <div className="max-h-56 overflow-y-auto rounded-md border border-slate-200 divide-y divide-slate-100">
                   {loadingDirectory && (
                     <div className="p-4 text-xs text-slate-500 flex items-center gap-2">
@@ -1721,12 +1764,15 @@ export default function OpnConnect({
                   )}
                   {!loadingDirectory && filteredDirectory.length === 0 && (
                     <div className="p-4 text-xs text-slate-500">
-                      Aucun utilisateur disponible.
+                      {onlineOnly
+                        ? 'Aucun collègue en ligne pour le moment (activité < 3 min).'
+                        : 'Aucun utilisateur disponible.'}
                     </div>
                   )}
                   {filteredDirectory.map((user) => {
                     const uid = user.id;
                     const checked = selectedMemberIds.includes(uid);
+                    const isOnline = Boolean(user?.online);
                     return (
                       <label
                         key={uid}
@@ -1740,10 +1786,23 @@ export default function OpnConnect({
                           onChange={() => toggleMember(uid)}
                           className="rounded border-slate-300 text-[#2E68B4] focus:ring-[#2E68B4]"
                         />
-                        <div className="min-w-0">
-                          <p className="text-xs font-semibold text-slate-800 truncate">
-                            {directoryLabel(user)}
-                          </p>
+                        <span
+                          className={`w-2.5 h-2.5 rounded-full shrink-0 ring-2 ring-white ${
+                            isOnline ? 'bg-emerald-500' : 'bg-slate-300'
+                          }`}
+                          title={isOnline ? 'En ligne' : 'Hors ligne'}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <p className="text-xs font-semibold text-slate-800 truncate">
+                              {directoryLabel(user)}
+                            </p>
+                            {isOnline && (
+                              <span className="shrink-0 text-[9px] font-black uppercase tracking-wide text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
+                                En ligne
+                              </span>
+                            )}
+                          </div>
                           <p className="text-[10px] text-slate-500 truncate">
                             {directorySub(user)}
                           </p>
@@ -1755,6 +1814,9 @@ export default function OpnConnect({
                 <p className="mt-1.5 text-[10px] text-slate-500">
                   {selectedMemberIds.length} sélectionné
                   {selectedMemberIds.length > 1 ? 's' : ''}
+                  {onlineDirectoryCount > 0
+                    ? ` · ${onlineDirectoryCount} profil${onlineDirectoryCount > 1 ? 's' : ''} actif${onlineDirectoryCount > 1 ? 's' : ''}`
+                    : ''}
                 </p>
               </div>
 

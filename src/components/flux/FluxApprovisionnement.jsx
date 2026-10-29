@@ -400,6 +400,96 @@ function construireHierarchieCommandes(liste) {
     });
 }
 
+/** Date de référence d’un BC global (transfert siège, sinon création). */
+function instantBcGlobal(bc) {
+  const ref = bc?.transferee_au_siege_at || bc?.created_at || bc?.date_livraison_prevue;
+  const date = ref ? new Date(ref) : null;
+  if (!date || Number.isNaN(date.getTime())) return new Date(0);
+  return date;
+}
+
+function comparerBcRecents(a, b) {
+  const delta = instantBcGlobal(b).getTime() - instantBcGlobal(a).getTime();
+  if (delta !== 0) return delta;
+  return Number(b?.id || 0) - Number(a?.id || 0);
+}
+
+/**
+ * Hiérarchie BC globaux siège : année → mois → jour → antenne → BCG.
+ * Même disposition que les commandes individuelles.
+ */
+function construireHierarchieBcGlobaux(liste) {
+  const aujourdhui = new Date();
+  const parAnnee = new Map();
+
+  (liste || []).forEach((bc) => {
+    const date = instantBcGlobal(bc);
+    const annee = date.getTime() ? date.getFullYear() : aujourdhui.getFullYear();
+    const mois = date.getTime() ? date.getMonth() + 1 : aujourdhui.getMonth() + 1;
+    const jour = date.getTime() ? date.getDate() : aujourdhui.getDate();
+
+    if (!parAnnee.has(annee)) parAnnee.set(annee, new Map());
+    const parMois = parAnnee.get(annee);
+    if (!parMois.has(mois)) parMois.set(mois, new Map());
+    const parJour = parMois.get(mois);
+    if (!parJour.has(jour)) parJour.set(jour, new Map());
+    const parAntenne = parJour.get(jour);
+
+    const antenneId = bc.antenne_id || 0;
+    const cle = `antenne:${antenneId}:${bc.antenne_nom || 'sans-antenne'}`;
+    if (!parAntenne.has(cle)) {
+      parAntenne.set(cle, {
+        cle,
+        antenne_id: antenneId,
+        antenne_nom: bc.antenne_nom || 'Antenne',
+        bc_globaux: [],
+      });
+    }
+    parAntenne.get(cle).bc_globaux.push(bc);
+  });
+
+  return [...parAnnee.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([annee, parMois]) => {
+      const mois = [...parMois.entries()]
+        .sort((a, b) => b[0] - a[0])
+        .map(([moisNum, parJour]) => {
+          const jours = [...parJour.entries()]
+            .sort((a, b) => b[0] - a[0])
+            .map(([jourNum, parAntenne]) => {
+              const antennes = [...parAntenne.values()]
+                .map((bloc) => ({
+                  ...bloc,
+                  bc_globaux: [...bloc.bc_globaux].sort(comparerBcRecents),
+                  nb_bc: bloc.bc_globaux.length,
+                }))
+                .sort((a, b) => a.antenne_nom.localeCompare(b.antenne_nom, 'fr'));
+              const estAujourdhui = annee === aujourdhui.getFullYear()
+                && moisNum === aujourdhui.getMonth() + 1
+                && jourNum === aujourdhui.getDate();
+              return {
+                jour: jourNum,
+                libelle: `${jourNum} ${(LIBELLES_MOIS[moisNum] || '').toLowerCase()}`,
+                estAujourdhui,
+                nb_bc: antennes.reduce((n, a) => n + a.nb_bc, 0),
+                antennes,
+              };
+            });
+          return {
+            mois: moisNum,
+            libelle: LIBELLES_MOIS[moisNum] || String(moisNum),
+            nb_bc: jours.reduce((n, j) => n + j.nb_bc, 0),
+            jours,
+          };
+        });
+      return {
+        annee,
+        nb_bc: mois.reduce((n, m) => n + m.nb_bc, 0),
+        mois,
+      };
+    });
+}
+
 /** Formate un montant en francs CFA. */
 function formaterMontant(valeur) {
   return `${Number(valeur || 0).toLocaleString('fr-FR')} F`;
@@ -598,6 +688,9 @@ export default function FluxApprovisionnement({ activePersona }) {
   const [selectionBc, setSelectionBc] = useState(() => new Set());
   const [bcGlobaux, setBcGlobaux] = useState([]);
   const [vueChef, setVueChef] = useState('demandeurs'); // demandeurs | chronologie | bc | stock
+  const [vueSiege, setVueSiege] = useState('bc'); // bc | demandes — mission principale = BC global
+  const [bcOuvertId, setBcOuvertId] = useState(null);
+  const [fluxNotifs, setFluxNotifs] = useState([]);
   const [modalSignatureBl, setModalSignatureBl] = useState(null);
   const [entreeStock, setEntreeStock] = useState({ produit_id: '', quantite: '', numero_lot: '', date_peremption: '' });
   const [savingStock, setSavingStock] = useState(false);
@@ -696,6 +789,12 @@ export default function FluxApprovisionnement({ activePersona }) {
         }
         if (bc.status === 'fulfilled') {
           setBcGlobaux(bc.value.bc_globaux || []);
+        }
+        try {
+          const notifs = await apiRequest('/flux/notifications');
+          setFluxNotifs(notifs.notifications || []);
+        } catch {
+          /* notifications optionnelles */
         }
       }
       const precedent = cacheFlux.get(cleCompte) || {};
@@ -942,6 +1041,30 @@ export default function FluxApprovisionnement({ activePersona }) {
     }
   }
 
+  function ouvrirPriseBc(bc) {
+    const initial = {};
+    (bc.lignes || []).forEach((row) => {
+      const max = Math.max(0, Number(row.quantite || 0) - Number(row.quantite_prise_siege || 0));
+      initial[row.id] = max > 0 ? max : 0;
+    });
+    setQuantitesAction(initial);
+    setNoteAction('');
+    setDateLivraisonReliquatAction(String(bc.date_livraison_prevue || dateLivraisonPrevue || '').slice(0, 10));
+    setError('');
+    setModalAction({ type: 'prise_bc', bc, commande: { numero_commande: bc.numero, lignes: bc.lignes || [] } });
+  }
+
+  async function ouvrirPriseUrgente(commande) {
+    if (commande.bc_global_id) {
+      const ok = await askConfirm({
+        message: `Prise urgente individuelle de ${commande.numero_commande} ? Le chef d'antenne sera notifié. La voie normale est la prise en charge du BC global antenne.`,
+        confirmLabel: 'Prise urgente (notifier le chef)',
+      });
+      if (!ok) return;
+    }
+    ouvrirAction('prise', commande);
+  }
+
   async function genererBlSigne(commande) {
     setModalSignatureBl({
       commande,
@@ -993,6 +1116,9 @@ export default function FluxApprovisionnement({ activePersona }) {
     if (type === 'prise_antenne') {
       return Math.max(0, Number(row.quantite_demandee || 0) - Number(row.quantite_prise_antenne || 0));
     }
+    if (type === 'prise_bc') {
+      return Math.max(0, Number(row.quantite || 0) - Number(row.quantite_prise_siege || 0));
+    }
     if (type === 'prise') return reliquatLigne(row);
     return resteDispersionLigne(row);
   }
@@ -1037,8 +1163,9 @@ export default function FluxApprovisionnement({ activePersona }) {
 
   async function confirmerAction() {
     if (!modalAction) return;
-    const { type, commande } = modalAction;
-    const lignes = (commande.lignes || [])
+    const { type, commande, bc: bcModal } = modalAction;
+    const sourceLignes = type === 'prise_bc' ? (bcModal?.lignes || []) : (commande.lignes || []);
+    const lignes = sourceLignes
       .map((row) => ({
         id: row.id,
         quantite: Number(quantitesAction[row.id] || 0),
@@ -1050,18 +1177,15 @@ export default function FluxApprovisionnement({ activePersona }) {
       return;
     }
 
-    const resteApres = (commande.lignes || []).reduce((n, row) => {
+    const resteApres = sourceLignes.reduce((n, row) => {
       const max = maxActionLigne(type, row);
       const prisMaintenant = Number(quantitesAction[row.id] || 0);
-      if (type === 'prise_antenne') {
-        return n + Math.max(0, max - prisMaintenant);
-      }
-      if (type === 'prise') {
+      if (type === 'prise_antenne' || type === 'prise' || type === 'prise_bc') {
         return n + Math.max(0, max - prisMaintenant);
       }
       return n;
     }, 0);
-    if ((type === 'prise_antenne' || type === 'prise') && resteApres > 0 && !dateLivraisonReliquatAction) {
+    if ((type === 'prise_antenne' || type === 'prise' || type === 'prise_bc') && resteApres > 0 && !dateLivraisonReliquatAction) {
       setError('Indiquez la date de livraison prévue du reliquat.');
       return;
     }
@@ -1069,8 +1193,8 @@ export default function FluxApprovisionnement({ activePersona }) {
     setSavingAction(true);
     setError('');
     try {
-      if (type === 'prise') {
-        const res = await apiRequest(`/flux/commandes/${commande.id}/transmettre`, {
+      if (type === 'prise_bc') {
+        await apiRequest(`/flux/bc-globaux/${bcModal.id}/prise-en-charge`, {
           method: 'POST',
           body: JSON.stringify({
             lignes,
@@ -1079,12 +1203,28 @@ export default function FluxApprovisionnement({ activePersona }) {
             date_livraison_prevue: dateLivraisonReliquatAction || undefined,
           }),
         });
+        pushToast(`BC global ${bcModal.numero} pris en charge — quantités réparties sur les demandeurs.`);
+        setDocsRefreshKey((k) => k + 1);
+      } else if (type === 'prise') {
+        const urgence = Boolean(commande.bc_global_id);
+        const res = await apiRequest(`/flux/commandes/${commande.id}/transmettre`, {
+          method: 'POST',
+          body: JSON.stringify({
+            lignes,
+            note: noteAction || undefined,
+            date_livraison_reliquat: dateLivraisonReliquatAction || undefined,
+            date_livraison_prevue: dateLivraisonReliquatAction || undefined,
+            urgence_specifique: urgence || undefined,
+          }),
+        });
         const bc = res?.bon_commande?.numero;
         const fac = res?.facture?.numero;
         pushToast(
-          bc && fac
-            ? `Prise en charge OK — BC ${bc} et facture ${fac} générés.`
-            : `Prise en charge enregistrée pour ${commande.numero_commande}.`
+          urgence
+            ? `Prise urgente OK — le chef d'antenne a été notifié.${bc && fac ? ` BC ${bc} / facture ${fac}.` : ''}`
+            : (bc && fac
+              ? `Prise en charge OK — BC ${bc} et facture ${fac} générés.`
+              : `Prise en charge enregistrée pour ${commande.numero_commande}.`)
         );
         setDocsRefreshKey((k) => k + 1);
       } else if (type === 'prise_antenne') {
@@ -1223,6 +1363,12 @@ export default function FluxApprovisionnement({ activePersona }) {
   const hierarchiePage = useMemo(
     () => construireHierarchieCommandes(commandesPage),
     [commandesPage],
+  );
+
+  /** BC globaux : année → mois → jour → antenne → BCG. */
+  const hierarchieBc = useMemo(
+    () => construireHierarchieBcGlobaux(bcGlobaux),
+    [bcGlobaux],
   );
 
   function compteFiltre(id) {
@@ -1378,7 +1524,14 @@ export default function FluxApprovisionnement({ activePersona }) {
               </button>
             )}
             {act.aPrendre && (
-              <button type="button" onClick={() => ouvrirAction('prise', commande)} className="px-2 py-1 font-bold rounded bg-[#2E68B4] text-white">Prendre en charge</button>
+              <button
+                type="button"
+                onClick={() => (commande.bc_global_id ? ouvrirPriseUrgente(commande) : ouvrirAction('prise', commande))}
+                className={`px-2 py-1 font-bold rounded text-white ${commande.bc_global_id ? 'bg-orange-600' : 'bg-[#2E68B4]'}`}
+                title={commande.bc_global_id ? 'Cas urgent rare — le chef d\'antenne sera notifié' : 'Prendre en charge'}
+              >
+                {commande.bc_global_id ? 'Prise urgente' : 'Prendre en charge'}
+              </button>
             )}
             {act.aDisperser && (
               <button type="button" onClick={() => ouvrirAction('dispersion', commande)} className="px-2 py-1 font-bold rounded bg-[#0E2A4F] text-white">Disperser</button>
@@ -1401,6 +1554,33 @@ export default function FluxApprovisionnement({ activePersona }) {
     <div className="flex-1 min-h-0 flex flex-col gap-4">
       {error && !modalOuvert && !modalAction && <p className="shrink-0 text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded px-3 py-2">{error}</p>}
 
+      {estChefAntenne && fluxNotifs.some((n) => !n.lu_at) && (
+        <div className="shrink-0 space-y-1.5">
+          {fluxNotifs.filter((n) => !n.lu_at).slice(0, 3).map((n) => (
+            <div key={n.id} className="flex flex-wrap items-start justify-between gap-2 rounded border border-orange-200 bg-orange-50 px-3 py-2 text-xs text-orange-950">
+              <div className="min-w-0">
+                <p className="font-bold">{n.titre}</p>
+                <p className="mt-0.5 text-[11px] text-orange-900/90">{n.message}</p>
+              </div>
+              <button
+                type="button"
+                className="shrink-0 px-2 py-1 text-[10px] font-bold rounded border border-orange-300 bg-white"
+                onClick={async () => {
+                  try {
+                    await apiRequest(`/flux/notifications/${n.id}/lire`, { method: 'POST', body: '{}' });
+                    setFluxNotifs((prev) => prev.map((x) => (x.id === n.id ? { ...x, lu_at: new Date().toISOString() } : x)));
+                  } catch {
+                    /* ignore */
+                  }
+                }}
+              >
+                Marquer lu
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <section className="flex-1 min-h-0 flex flex-col bg-white border border-slate-200 rounded-md overflow-hidden">
         <div className="shrink-0 p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
@@ -1411,10 +1591,9 @@ export default function FluxApprovisionnement({ activePersona }) {
               </button>
             </div>
             <p className="text-[11px] text-slate-500 mt-0.5">
-              {commandesVisibles.length} affichée{commandesVisibles.length > 1 ? 's' : ''} sur {commandes.length}
-              {estDemandeur ? ' — brouillon puis envoi au chef d\'antenne' : ''}
-              {estChefAntenne ? ' — organisées par demandeur · stock local · BC global' : ''}
-              {(estDirectionGenerale || estSupervision) && estVueSiege ? ' — année, mois, jour, les plus récentes en haut' : ''}
+              {estVueSiege && vueSiege === 'bc'
+                ? `${bcGlobaux.length} ${bcGlobaux.length > 1 ? 'BC globaux' : 'BC global'} — année, mois, jour, antenne, BCG`
+                : `${commandesVisibles.length} affichée${commandesVisibles.length > 1 ? 's' : ''} sur ${commandes.length}${estDemandeur ? ' — brouillon puis envoi au chef d\'antenne' : ''}${estChefAntenne ? ' — organisées par demandeur · stock local · BC global' : ''}${(estDirectionGenerale || estSupervision) && estVueSiege ? ' — année, mois, jour, les plus récentes en haut' : ''}`}
             </p>
             {alertesRupture.length > 0 && estChefAntenne && (
               <p className="mt-1 text-[11px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 inline-block">
@@ -1495,6 +1674,27 @@ export default function FluxApprovisionnement({ activePersona }) {
           </div>
         )}
 
+        {estVueSiege && ongletFlux === 'commandes' && (
+          <div className="shrink-0 px-4 pt-2 flex flex-wrap gap-1 items-center">
+            {[
+              { id: 'bc', label: `BC globaux antennes (${bcGlobaux.length})` },
+              { id: 'demandes', label: 'Demandes individuelles' },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setVueSiege(tab.id)}
+                className={`px-2.5 py-1 rounded text-[11px] font-bold border ${vueSiege === tab.id ? 'bg-[#0E2A4F] text-white border-[#0E2A4F]' : 'bg-white text-slate-600 border-slate-200'}`}
+              >
+                {tab.label}
+              </button>
+            ))}
+            <p className="ml-auto text-[10px] text-slate-500 max-w-md text-right">
+              Mission principale : prise en charge du BC global antenne. La prise d&apos;une demande isolée est réservée aux urgences (chef notifié).
+            </p>
+          </div>
+        )}
+
         <div className="shrink-0 px-4 pt-3 border-b border-slate-100">
           <div className="flex flex-wrap gap-1 p-0.5 rounded-md bg-slate-100 border border-slate-200 w-fit">
             {[
@@ -1523,29 +1723,31 @@ export default function FluxApprovisionnement({ activePersona }) {
 
         {ongletFlux === 'commandes' && (
           <>
-            <div className="shrink-0 px-4 py-3 border-b border-slate-100 flex flex-wrap items-center gap-2">
-              <label className="relative flex-1 min-w-[220px]">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                <input
-                  value={recherche}
-                  onChange={(e) => setRecherche(e.target.value)}
-                  placeholder="Rechercher un numéro, un demandeur, une pharmacie, un médicament…"
-                  className="w-full border border-slate-200 rounded pl-8 pr-2 py-1.5 text-sm"
-                />
-              </label>
-              <div className="flex flex-wrap gap-1.5">
-                {FILTRES.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => setFiltre(item.id)}
-                    className={`px-2.5 py-1 rounded text-[11px] font-bold border ${filtre === item.id ? 'bg-[#0E2A4F] text-white border-[#0E2A4F]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
-                  >
-                    {item.label} ({loading ? '…' : compteFiltre(item.id)})
-                  </button>
-                ))}
+            {!(estVueSiege && vueSiege === 'bc') && (
+              <div className="shrink-0 px-4 py-3 border-b border-slate-100 flex flex-wrap items-center gap-2">
+                <label className="relative flex-1 min-w-[220px]">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    value={recherche}
+                    onChange={(e) => setRecherche(e.target.value)}
+                    placeholder="Rechercher un numéro, un demandeur, une pharmacie, un médicament…"
+                    className="w-full border border-slate-200 rounded pl-8 pr-2 py-1.5 text-sm"
+                  />
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {FILTRES.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setFiltre(item.id)}
+                      className={`px-2.5 py-1 rounded text-[11px] font-bold border ${filtre === item.id ? 'bg-[#0E2A4F] text-white border-[#0E2A4F]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                    >
+                      {item.label} ({loading ? '…' : compteFiltre(item.id)})
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="flex-1 min-h-0 overflow-auto flex flex-col">
               <div className="flex-1 min-h-0 overflow-auto">
@@ -1555,12 +1757,142 @@ export default function FluxApprovisionnement({ activePersona }) {
                   </p>
                 )}
 
-                {!loading && commandesVisibles.length === 0 && !(estChefAntenne && (vueChef === 'stock' || vueChef === 'bc')) && (
+                {!loading && commandesVisibles.length === 0 && !(estChefAntenne && (vueChef === 'stock' || vueChef === 'bc')) && !(estVueSiege && vueSiege === 'bc') && (
                   <p className="text-xs text-slate-500 text-center py-8">
                     {commandes.length === 0
                       ? (estDemandeur ? 'Aucune demande enregistrée. Utilisez Nouvelle demande pour commander auprès de votre antenne.' : 'Aucune commande pour ce profil.')
                       : 'Aucune commande ne correspond à cette recherche.'}
                   </p>
+                )}
+
+                {!loading && estVueSiege && vueSiege === 'bc' && (
+                  <div className="p-3 space-y-3">
+                    <p className="text-[11px] text-slate-500 px-1">
+                      Classement année → mois → jour → antenne → BCG. Ouvrez un BC pour voir les demandeurs constitutifs, puis prenez en charge l&apos;ensemble.
+                    </p>
+                    {hierarchieBc.map((anneeBloc) => {
+                      const ouverte = !anneesRepliees.has(`bc-${anneeBloc.annee}`);
+                      return (
+                        <div key={anneeBloc.annee} className="border border-slate-200 rounded-md overflow-hidden bg-white">
+                          <button
+                            type="button"
+                            onClick={() => basculerAnnee(`bc-${anneeBloc.annee}`)}
+                            className="w-full flex items-center justify-between gap-2 px-3 py-2.5 bg-[#0E2A4F] text-white text-left"
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              {ouverte ? <ChevronDown className="w-4 h-4 opacity-80" /> : <ChevronRight className="w-4 h-4 opacity-80" />}
+                              <span className="text-sm font-black tracking-wide">{anneeBloc.annee}</span>
+                            </span>
+                            <span className="text-[11px] font-semibold">{anneeBloc.nb_bc} {anneeBloc.nb_bc > 1 ? 'BC globaux' : 'BC global'}</span>
+                          </button>
+                          {ouverte && (
+                            <div className="ml-4 border-l-2 border-slate-300 pl-3 py-3 space-y-4 bg-slate-50/30">
+                              {(anneeBloc.mois || []).map((moisBloc) => (
+                                <div key={moisBloc.mois} className="space-y-2">
+                                  <p className="text-xs font-bold text-slate-800">
+                                    {moisBloc.libelle} {anneeBloc.annee}
+                                    <span className="ml-2 font-semibold text-slate-500">— {moisBloc.nb_bc} BC</span>
+                                  </p>
+                                  <div className="ml-3 border-l-2 border-slate-200 pl-3 space-y-3">
+                                    {(moisBloc.jours || []).map((jourBloc) => (
+                                      <div key={jourBloc.jour} className="space-y-2">
+                                        <p className={`text-[11px] font-bold ${jourBloc.estAujourdhui ? 'text-[#0E2A4F]' : 'text-slate-700'}`}>
+                                          {jourBloc.libelle}
+                                          {jourBloc.estAujourdhui && (
+                                            <span className="ml-2 inline-flex items-center rounded bg-[#0E2A4F] px-1.5 py-0.5 text-[10px] font-bold text-white">Aujourd&apos;hui</span>
+                                          )}
+                                          <span className="ml-2 font-semibold text-slate-500">— {jourBloc.nb_bc} BC</span>
+                                        </p>
+                                        <div className="ml-3 border-l-2 border-blue-200 pl-3 space-y-3">
+                                          {(jourBloc.antennes || []).map((antenneBloc) => (
+                                            <div key={antenneBloc.cle} className="space-y-1.5">
+                                              <div className="rounded-md bg-white border border-slate-200 px-3 py-2">
+                                                <p className="text-sm font-bold leading-snug text-indigo-900">
+                                                  Antenne {antenneBloc.antenne_nom}
+                                                  <span className="ml-2 text-[11px] font-semibold text-slate-500">— {antenneBloc.nb_bc} BCG</span>
+                                                </p>
+                                              </div>
+                                              <div className="ml-4 border-l-2 border-slate-200 pl-3 space-y-1.5">
+                                                {(antenneBloc.bc_globaux || []).map((bc) => {
+                                                  const ouvert = bcOuvertId === bc.id;
+                                                  const reste = Number(bc.quantite_reliquat ?? Math.max(0, Number(bc.quantite_totale || 0) - Number(bc.quantite_prise_siege || 0)));
+                                                  const peutPrendreBc = peutPrendreCharge && ['TRANSFERE_SIEGE', 'PARTIELLEMENT_PRISE'].includes(bc.statut) && reste > 0;
+                                                  return (
+                                                    <div key={bc.id} className="border border-slate-200 rounded-md bg-white overflow-hidden">
+                                                      <div className="px-3 py-2.5 flex flex-wrap items-start justify-between gap-2">
+                                                        <button type="button" onClick={() => setBcOuvertId(ouvert ? null : bc.id)} className="text-left min-w-0 flex-1">
+                                                          <p className="text-sm font-bold font-mono text-slate-900 inline-flex items-center gap-1.5">
+                                                            {ouvert ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                                                            {bc.numero}
+                                                          </p>
+                                                          <p className="text-[11px] text-slate-600 mt-0.5">
+                                                            {bc.nb_demandes} demandes · {bc.nb_demandeurs} demandeurs · {bc.quantite_totale} u.
+                                                            {bc.quantite_prise_siege > 0 && <> · pris siège {bc.quantite_prise_siege}</>}
+                                                            {reste > 0 && <> · reliquat {reste}</>}
+                                                          </p>
+                                                          <p className="text-[10px] text-slate-500">
+                                                            Statut {bc.statut}
+                                                            {bc.transferee_au_siege_at ? ` · reçu ${formaterDate(bc.transferee_au_siege_at)}` : ''}
+                                                            {bc.prise_en_charge_siege_par_nom ? ` · pris par ${bc.prise_en_charge_siege_par_nom}` : ''}
+                                                          </p>
+                                                        </button>
+                                                        {peutPrendreBc && (
+                                                          <button type="button" onClick={() => ouvrirPriseBc(bc)} className="px-2.5 py-1.5 text-[11px] font-bold rounded bg-[#2E68B4] text-white shrink-0">
+                                                            Prendre en charge le BC
+                                                          </button>
+                                                        )}
+                                                      </div>
+                                                      {ouvert && (
+                                                        <div className="border-t border-slate-100 px-3 py-2 space-y-2 bg-slate-50/40">
+                                                          <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Composition par demandeur</p>
+                                                          <ul className="space-y-2">
+                                                            {(bc.lignes || []).map((l) => (
+                                                              <li key={l.id} className="text-[11px] border border-slate-200 rounded bg-white px-2.5 py-2">
+                                                                <p className="font-semibold text-slate-800">
+                                                                  {l.designation} × {l.quantite}
+                                                                  {l.quantite_prise_siege > 0 && <span className="ml-2 font-normal text-emerald-800">pris {l.quantite_prise_siege}</span>}
+                                                                  {l.quantite_reliquat > 0 && <span className="ml-2 font-normal text-violet-800">rel. {l.quantite_reliquat}</span>}
+                                                                </p>
+                                                                {(l.details_demandeurs || []).length > 0 ? (
+                                                                  <ul className="mt-1 space-y-0.5 pl-2 border-l-2 border-blue-200">
+                                                                    {(l.details_demandeurs || []).map((d, idx) => (
+                                                                      <li key={`${l.id}-${d.commande_id || idx}`} className="text-[10px] text-slate-600">
+                                                                        <span className="font-semibold text-slate-800">{d.demandeur_nom || 'Demandeur'}</span>
+                                                                        {d.numero_commande ? ` · ${d.numero_commande}` : ''}
+                                                                        {' — '}{d.quantite} u.
+                                                                        {d.partenaire_nom ? ` · ${d.partenaire_nom}` : ''}
+                                                                      </li>
+                                                                    ))}
+                                                                  </ul>
+                                                                ) : (
+                                                                  <p className="text-[10px] text-slate-400 mt-0.5">Détail demandeurs non disponible sur cette ligne.</p>
+                                                                )}
+                                                              </li>
+                                                            ))}
+                                                          </ul>
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                  );
+                                                })}
+                                              </div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {!bcGlobaux.length && (
+                      <p className="text-xs text-slate-500 text-center py-6">Aucun BC global transmis par les antennes pour le moment.</p>
+                    )}
+                  </div>
                 )}
 
                 {!loading && estChefAntenne && vueChef === 'demandeurs' && (
@@ -1750,7 +2082,7 @@ export default function FluxApprovisionnement({ activePersona }) {
                   </div>
                 )}
 
-                {!loading && hierarchiePage.length > 0 && (!estChefAntenne || vueChef === 'chronologie') && (
+                {!loading && hierarchiePage.length > 0 && (!estChefAntenne || vueChef === 'chronologie') && !(estVueSiege && vueSiege === 'bc') && (
                   <div className="p-3 space-y-3">
                     <p className="text-[11px] text-slate-500 px-1">
                       Classement année → mois → jour → demandeur (nom + profil), puis commandes tabulées. Seul le bandeau année se plie / déplie.
@@ -1833,7 +2165,7 @@ export default function FluxApprovisionnement({ activePersona }) {
                 )}
               </div>
 
-              {!loading && commandesVisibles.length > 0 && (
+              {!loading && commandesVisibles.length > 0 && !(estVueSiege && vueSiege === 'bc') && (
                 <div className="shrink-0 px-4 py-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 bg-white">
                   <label className="flex items-center gap-2">
                     Afficher
@@ -2017,7 +2349,17 @@ export default function FluxApprovisionnement({ activePersona }) {
                 </button>
               )}
               {actionsCommande(commandeDetail).aPrendre && (
-                <button type="button" onClick={() => { setLigneOuverte(null); ouvrirAction('prise', commandeDetail); }} className="px-3 py-2 text-xs font-bold rounded bg-[#2E68B4] text-white">Prendre en charge</button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLigneOuverte(null);
+                    if (commandeDetail.bc_global_id) ouvrirPriseUrgente(commandeDetail);
+                    else ouvrirAction('prise', commandeDetail);
+                  }}
+                  className={`px-3 py-2 text-xs font-bold rounded text-white ${commandeDetail.bc_global_id ? 'bg-orange-600' : 'bg-[#2E68B4]'}`}
+                >
+                  {commandeDetail.bc_global_id ? 'Prise urgente' : 'Prendre en charge'}
+                </button>
               )}
               {actionsCommande(commandeDetail).aDisperser && (
                 <button type="button" onClick={() => { setLigneOuverte(null); ouvrirAction('dispersion', commandeDetail); }} className="px-3 py-2 text-xs font-bold rounded bg-[#0E2A4F] text-white">Disperser</button>
@@ -2095,15 +2437,23 @@ export default function FluxApprovisionnement({ activePersona }) {
                 <h2 className="text-sm font-bold text-slate-900">
                   {modalAction.type === 'prise_antenne'
                     ? 'Prise stock antenne'
-                    : (modalAction.type === 'prise' ? 'Prise en charge siège' : 'Dispersion')}
-                  {' — '}{modalAction.commande.numero_commande}
+                    : (modalAction.type === 'prise_bc'
+                      ? 'Prise en charge BC global'
+                      : (modalAction.type === 'prise'
+                        ? (modalAction.commande?.bc_global_id ? 'Prise urgente individuelle' : 'Prise en charge siège')
+                        : 'Dispersion'))}
+                  {' — '}{modalAction.type === 'prise_bc' ? (modalAction.bc?.numero || '') : modalAction.commande.numero_commande}
                 </h2>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   {modalAction.type === 'prise_antenne'
                     ? 'Servez depuis le stock de votre antenne. Le reliquat pourra entrer dans le BC global vers le siège.'
-                    : (modalAction.type === 'prise'
-                      ? 'Indiquez la quantité à engager maintenant. Le reste est archivé et pourra être pris en charge au prochain arrivage.'
-                      : 'Dispersez tout ou une partie des quantités déjà prises en charge. Un bon de livraison signé sera proposé ensuite.')}
+                    : (modalAction.type === 'prise_bc'
+                      ? 'Prise en charge du BC global antenne. Les quantités sont réparties automatiquement sur les demandeurs constitutifs.'
+                      : (modalAction.type === 'prise'
+                        ? (modalAction.commande?.bc_global_id
+                          ? 'Cas urgent rare. Le chef d\'antenne sera notifié de cette prise hors BC global.'
+                          : 'Indiquez la quantité à engager maintenant. Le reste est archivé et pourra être pris en charge au prochain arrivage.')
+                        : 'Dispersez tout ou une partie des quantités déjà prises en charge. Un bon de livraison signé sera proposé ensuite.'))}
                 </p>
               </div>
               <button type="button" disabled={savingAction} onClick={() => setModalAction(null)} className="p-1 rounded text-slate-500 hover:bg-slate-100" aria-label="Fermer">
@@ -2120,19 +2470,33 @@ export default function FluxApprovisionnement({ activePersona }) {
               </button>
             </div>
             <ul className="border border-slate-200 rounded divide-y divide-slate-100">
-              {(modalAction.commande.lignes || []).map((row) => {
+              {((modalAction.type === 'prise_bc' ? modalAction.bc?.lignes : modalAction.commande.lignes) || []).map((row) => {
                 const max = maxActionLigne(modalAction.type, row);
                 const disabled = max <= 0;
+                const estBc = modalAction.type === 'prise_bc';
                 return (
                   <li key={row.id} className={`flex flex-wrap items-center gap-3 px-3 py-2.5 ${disabled ? 'bg-slate-50 opacity-70' : ''}`}>
                     <div className="flex-1 min-w-[180px]">
                       <p className="text-xs font-semibold text-slate-800">{row.designation}</p>
                       <p className="text-[10px] text-slate-500">
-                        Demandé {row.quantite_demandee}
-                        {' · '}antenne {row.quantite_prise_antenne || 0}
-                        {' · '}siège {row.quantite_prise_en_charge || 0}
-                        {' · '}reliquat {reliquatLigne(row)}
-                        {' · '}dispersé {row.quantite_dispersee || 0}
+                        {estBc ? (
+                          <>
+                            BC {row.quantite}
+                            {' · '}pris siège {row.quantite_prise_siege || 0}
+                            {' · '}reliquat {Math.max(0, Number(row.quantite || 0) - Number(row.quantite_prise_siege || 0))}
+                            {(row.details_demandeurs || []).length > 0 && (
+                              <> · {(row.details_demandeurs || []).map((d) => d.demandeur_nom).filter(Boolean).join(', ')}</>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            Demandé {row.quantite_demandee}
+                            {' · '}antenne {row.quantite_prise_antenne || 0}
+                            {' · '}siège {row.quantite_prise_en_charge || 0}
+                            {' · '}reliquat {reliquatLigne(row)}
+                            {' · '}dispersé {row.quantite_dispersee || 0}
+                          </>
+                        )}
                         {disabled ? ' — rien à traiter' : ` — max cette vague : ${max}`}
                       </p>
                     </div>
@@ -2152,7 +2516,7 @@ export default function FluxApprovisionnement({ activePersona }) {
                 );
               })}
             </ul>
-            {(modalAction.type === 'prise_antenne' || modalAction.type === 'prise') && (
+            {(modalAction.type === 'prise_antenne' || modalAction.type === 'prise' || modalAction.type === 'prise_bc') && (
               <label className="block text-xs text-slate-600">
                 Date de livraison du reliquat
                 <input
@@ -2173,18 +2537,28 @@ export default function FluxApprovisionnement({ activePersona }) {
                 value={noteAction}
                 onChange={(e) => setNoteAction(e.target.value)}
                 disabled={savingAction}
-                placeholder={modalAction.type === 'prise' ? 'Ex. stock partiel, reste à l\'arrivage prévu' : 'Ex. dispersion selon stock Owendo'}
+                placeholder={
+                  modalAction.type === 'prise_bc'
+                    ? 'Ex. stock national partiel, suite à l\'arrivage'
+                    : (modalAction.type === 'prise'
+                      ? (modalAction.commande?.bc_global_id ? 'Motif de l\'urgence spécifique' : 'Ex. stock partiel, reste à l\'arrivage prévu')
+                      : 'Ex. dispersion selon stock Owendo')
+                }
                 className="mt-1 w-full border border-slate-200 rounded px-2 py-1.5 text-sm"
               />
             </label>
             <div className="flex justify-end gap-2 pt-1">
               <button type="button" disabled={savingAction} onClick={() => setModalAction(null)} className="px-3 py-2 text-xs font-bold rounded border border-slate-300 text-slate-700">Annuler</button>
-              <button type="button" disabled={savingAction} onClick={confirmerAction} className="px-3 py-2 text-xs font-bold rounded bg-[#0E2A4F] text-white">
+              <button type="button" disabled={savingAction} onClick={confirmerAction} className={`px-3 py-2 text-xs font-bold rounded text-white ${modalAction.type === 'prise' && modalAction.commande?.bc_global_id ? 'bg-orange-600' : 'bg-[#0E2A4F]'}`}>
                 {savingAction
                   ? 'Enregistrement…'
                   : (modalAction.type === 'prise_antenne'
                     ? 'Confirmer (stock antenne)'
-                    : (modalAction.type === 'prise' ? 'Confirmer la prise en charge' : 'Confirmer la dispersion'))}
+                    : (modalAction.type === 'prise_bc'
+                      ? 'Confirmer la prise du BC global'
+                      : (modalAction.type === 'prise'
+                        ? (modalAction.commande?.bc_global_id ? 'Confirmer (notifier le chef)' : 'Confirmer la prise en charge')
+                        : 'Confirmer la dispersion')))}
               </button>
             </div>
           </div>
